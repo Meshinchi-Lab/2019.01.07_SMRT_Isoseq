@@ -1,0 +1,2224 @@
+---
+title: 'Filter Isoforms for Quantification'
+author: "Jenny Smith"
+date: "May 6, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,'2019.01.07_SMRT_Isoseq/'))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', 
+                      fig.height=5, fig.width=8, dpi = 300)
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+
+library(DeGSEA)
+
+library(forcats)
+library(purrr)
+
+library(Biostrings)
+library(BSgenome) 
+library(GenomicRanges)  
+library(rtracklayer) 
+
+getwd()
+```
+
+```{r}
+source(file.path(SCRIPTS, "conversion_scripts/Merge_Cat_FixDupIDs_Function.r"))
+```
+
+
+http://atlasgeneticsoncology.org/Anomalies/
+
+t(6;9)(p22;q34) DEK/NUP214
+t(5;11)(q35;p15.5) NUP98/NSD1
+t(16;21)(p11;q22) FUS/ERG
+t(11;17)(q23;q12-21) KMT2A/LASP1
+t(9;11)(p21;q23) KMT2A/MLLT3
+t(8;21)(q22;q22) RUNX1/RUNX1T1
+inv(16)(p13q24) CBFA2T3/GLIS2 
+
+#Define Functions
+
+```{r}
+waterfall_facets <- function(ordered.data,fill.col,intercept=1){
+  ggplot(data = ordered.data,
+                 aes_string(x="Order", y="TPM",
+                     fill=fill.col, 
+                     color=fill.col)) +
+          geom_bar(stat ="identity") +
+          facet_wrap(~Transcript, scales = 'free') +
+          geom_hline(aes(yintercept = intercept),
+                     color="black",linetype="dashed") +
+          scale_fill_brewer(type="qual",
+                      palette = "Paired",
+                      aesthetics = c("colour", "fill")) +
+          theme(plot.title = element_text(hjust = 0.5, size = 16),
+                strip.background = element_rect(fill="navajowhite", linetype = 1),
+                strip.text = element_text(size=12),
+                panel.background = element_rect(fill="white"),
+                # panel.grid.major = element_blank(),
+                # panel.grid.minor = element_blank(),
+                axis.text.x = element_blank(),
+                axis.text.y = element_text(size = 14, color = "black"),
+                axis.title = element_text(size = 14),
+                plot.margin = margin(r = 1, t=1, l=1,unit="cm"),
+                legend.text = element_text(size=11),
+                legend.title = element_blank()) +
+          theme(legend.position="bottom") +
+          guides(fill = guide_legend(nrow = 4,ncol=3, byrow = TRUE)) +
+          guides(color = guide_legend(nrow = 4,ncol=3, byrow = TRUE)) +
+          labs(x="Patient", y="TPM", title="FLT3 Isoform Expression")
+}
+```
+
+
+#Read in the Clinical Data
+
+```{r}
+# CDEs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_7.08.20.csv"))
+# CDEs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_12.09.20.csv"))
+CDEs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"))
+
+CDEs <- CDEs %>% 
+  dplyr::filter(!is.na(Reg.),
+                !is.na(USI),
+                USI != "Unknown") %>% 
+   mutate(Reg.=as.character(Reg.))
+
+head(CDEs[,1:5])
+dim(CDEs) #2313  145
+```
+
+```{r}
+# dir(file.path(TARGET, "SequencingDataMatrix/"))
+manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_06.09.21.csv"))
+
+# head(manifest)
+dim(manifest)
+```
+
+```{r}
+samples <- read.csv("Sample_Submit_Files/Meshinchi_Isoseq3_Sample_manifest.csv") %>% 
+  left_join(., CDEs, by="USI")
+
+head(samples[,1:5])
+# table(samples$Protocol)
+```
+
+
+# Transcript Annotations
+
+```{r}
+ID.map <- read.csv("Kallisto_Quant/gencode.v29_PacBio_AML_NIC_Trancript_Gene_IDmap.csv")
+head(ID.map)
+dim(ID.map) # 211588     23
+# table(ID.map$transcript_type) #4894 
+```
+
+```{r}
+transcriptIDmap.ref <- read.delim(file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_TranscriptLevel_IDmap_1.18.20.txt"),
+                                  sep="\t") 
+  # mutate_at(vars(gene_id:transcript_id), ~gsub("\\.[0-9]{1,2}", "",.))
+
+dim(transcriptIDmap.ref) #207826     22
+head(transcriptIDmap.ref)
+
+# write.csv(transcriptIDmap.ref,
+#           file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_TranscriptLevel_IDmap_1.18.20.csv"),
+#           row.names = FALSE)
+```
+
+
+# Read in the Transcript Level Counts (Reference Based)
+
+```{r}
+TPM.reference <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/transcript_level/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_TranscriptLevel_Abundance_TPM.RDS"))
+
+dim(TPM.reference)
+```
+
+```{r}
+table(rownames(TPM.reference) %in% transcriptIDmap.ref$transcript_id) #OK
+```
+
+```{r}
+TPM.CellLines <- read.csv(file.path(PROJHOME, "2017.10.09_Concatenate_1031_RNAseq/transcriptLevel/CellLines/TARGET_AML_CelLines_Kallisto_Quant_TranscriptLevel_Abundance_TPM.csv"), row.names = 1)
+
+dim(TPM.CellLines)
+# table(rownames(TPM.CellLines) %in% transcriptIDmap.ref$transcript_id) #OK
+```
+
+
+#Merge the SQANTI Results 
+
+```{r}
+path="/fh/scratch/delete90/meshinchi_s/jlsmith3/SMRTseq/7_SQANTI"
+files <- dir(path, recursive = TRUE, pattern = "*filtered.+classification.txt",full.names = TRUE)
+# files
+```
+
+```{r eval=FALSE}
+r <- "^.+\\/([PR].+_all_movies.+)_only.+"
+cated <- catRbind(files, regex = r, header = TRUE)
+
+cated <- cated %>% 
+  select(Patient, everything()) %>% 
+  mutate(USI=str_split_fixed(Patient, pattern = "_", n=5)[,1], 
+         Reg.=str_split_fixed(Patient, pattern = "_", n=5)[,5]) %>% 
+  left_join(., select(samples,Reg.,Sample_Info) %>% unique(), 
+            by="Reg.") %>% 
+  select(Patient,USI,Reg.,Sample_Type=Sample_Info, everything())
+
+head(cated)
+dim(cated) #364169     41
+# write.csv(cated,"TARGET_AML_PacBio_Isoseq3_SQANTI_classification.csv", row.names = FALSE)
+```
+
+
+#Filter for Novel Isoforms of Interest
+
+The next steps are to select the novel isoforms for quantification with the short read data for all ~1,380 AML samples.  This will involve 
+1) selecting NIC/NNC isoforms per sample 
+2) take the union of NIC/NNC between fusion samples where possible 
+3) filter out any NIC/NNC isoforms also found in NBM 
+4) remove those that are non-protein coding. Since this class of isoforms tend to have the highest frequency of artifacts 
+
+
+```{r}
+cated <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification.csv") %>% 
+  mutate(Sample_Type=factor(Sample_Type , levels=unique(Sample_Type)))
+
+head(cated)
+# dim(cated)  #364,169     41
+```
+
+```{r}
+length(unique(cated$isoform))
+table(cated$Sample_Type)
+table(cated$RTS_stage)
+table(cated$coding)
+quantile(cated$perc_A_downstream_TTS)
+quantile(cated$dist_to_cage_peak,na.rm = TRUE)
+```
+
+```{r}
+quantile(cated$dist_to_cage_peak[cated$within_cage_peak == "True"], na.rm = TRUE)
+```
+
+```{r}
+table(cated$within_cage_peak, cated$structural_category)
+```
+
+```{r}
+table(cated$all_canonical, cated$structural_category)
+```
+
+```{r}
+table(cated$chrom)
+```
+
+```{r}
+# hist(cated$dist_to_cage_peak)
+```
+
+```{r}
+sum(is.na(cated$polyA_motif))
+```
+
+```{r}
+class.barplot_all <-  ggplot(cated %>% 
+         select(structural_category, Sample_Type, isoform) %>% 
+         unique(),
+       aes(x=structural_category, fill=Sample_Type)) + 
+  geom_bar(stat="count",position = "dodge") +
+  labs(title="Frequency of Isoforms by Category", y="Number of Isoforms") +
+  scale_fill_brewer(type="qual", palette = "Set1") +
+  theme_classic() + 
+  theme(text = element_text(size=15), 
+        axis.text.x = element_text(angle=20, vjust=1, hjust=1))
+
+class.barplot_all
+```
+
+
+```{r}
+
+```
+
+
+##Filter for high confidence Protien coding
+
+```{r}
+protein.coding <- cated %>% 
+  mutate(Group=ifelse(grepl("^BM|RO",USI), "NBM", "AML")) %>% 
+  filter(!RTS_stage, 
+         coding == "coding") %>%#use CAGE peak for higher confidence that transcript is expressed  within_cage_peak == "True"
+  filter(!is.na(dist_to_cage_peak)) %>%
+  filter(dist_to_cage_peak >= -150 & dist_to_cage_peak <= 150) %>% #
+  filter(all_canonical=="canonical") %>% #canonical splice motif (generally GU at the 5' end of the intron, AG at the 3' end)
+  filter(!grepl("chrM", chrom)) %>% 
+  filter(perc_A_downstream_TTS < 80) %>%
+  mutate(Sample_Type=factor(Sample_Type , levels=unique(Sample_Type))) 
+  
+  #out of curiosity - I calculated counts per million
+  # group_by(USI) %>%
+  # mutate(Total.Counts.Per.Sample=sum(FL), 
+  #        Tx_length_ratio=FL/length) %>% 
+  # group_by(isoform, add = TRUE) %>% 
+  # mutate(Counts.Per.Million=(FL/Total.Counts.Per.Sample)*1e6)
+  
+
+length(unique(protein.coding$isoform))
+dim(protein.coding) # 219714     42
+# head(protein.coding)
+```
+
+```{r}
+# write.csv(protein.coding, "Isoseq3_SQANTI_classification_Protein_Coding.csv")
+```
+
+```{r fig.width=10}
+m <- median(protein.coding$length)
+tx.length <-  ggplot(protein.coding, aes(x=length,color=Sample_Type)) + 
+  geom_density(fill=NA) + 
+  # scale_y_continuous(trans = "log10") +
+  scale_x_continuous(breaks = seq(0,10000, by=1000)) +
+  geom_vline(xintercept=m, color="red", linetype="dashed") +
+  labs(title = "Transcript Length by Sample Type", x="Transcript Length (bp)") +
+  # facet_wrap(~Sample_Type) +
+  theme_classic() +
+  theme(text = element_text(size=15))
+
+tx.length
+```
+
+
+```{r}
+cage.dist <- ggplot(protein.coding, aes(x=dist_to_cage_peak)) +
+  geom_histogram(binwidth = 10) + 
+  labs(title = "Distance to Cage Peaks for Transcripts Retained") +
+  theme_classic() +
+  theme(text=element_text(size=15))
+
+cage.dist
+```
+
+```{r}
+tx_by_chr <- ggplot(select(protein.coding,chrom, isoform, structural_category) %>% 
+         unique() %>% 
+         mutate(Chromosome=factor(gsub("chr","", chrom), levels=c(1:22, "X", "Y"))),
+       aes(x=Chromosome, fill=Chromosome)) + 
+  labs(title = "Number of Transcripts Detected per Chromosome", y="Number of Unique Transcripts") +
+  geom_bar() + 
+  theme_classic() +
+  theme(text = element_text(size=15), 
+        axis.text.x = element_text(angle=90, vjust=0.5, hjust=1), 
+        legend.position = "none")
+
+tx_by_chr
+```
+
+```{r}
+quantile(protein.coding$FL, probs = seq(0,1, length.out = 11))
+sum(protein.coding$FL > 13)
+```
+
+```{r}
+fl.hist <- ggplot(protein.coding, 
+                  aes(x=log2(FL+1))) + 
+  geom_histogram(binwidth = 0.5) +
+  scale_x_continuous(breaks = seq(1,10, by=1)) +
+  geom_vline(aes(xintercept=median(log2(FL+1))), color="red", size=1.5) +
+  theme_classic() +
+  theme(text = element_text(size=15))
+
+fl.hist
+```
+
+```{r}
+fl.perPatient <- ggplot(protein.coding, 
+                  aes(x=Sample_Type,y=log2(FL+1), fill=USI)) + 
+  geom_boxplot() +
+    labs(title = "Full length Read Counts per Sample") +
+  scale_y_continuous(breaks = seq(1,15, by=2)) +
+  theme_classic() +
+  scale_fill_brewer(type="qual", palette = "Set3") +
+    theme(text = element_text(size=15), 
+        axis.text.x = element_text(angle=25, vjust=1, hjust=1), 
+        plot.margin = margin(l=3,unit="cm"))
+
+# fl.perPatient
+```
+
+```{r fig.width=10}
+proteinCoding_by_fusion <- ggplot(protein.coding %>% 
+         select(structural_category, Sample_Type, isoform) %>% 
+         unique(),
+       aes(x=structural_category, fill=Sample_Type)) + 
+  geom_bar(stat="count",position = "dodge") +
+  labs(title="Frequency of Isoforms by Category", y="Number of Isoforms") +
+  scale_fill_brewer(type="qual", palette = "Set1") +
+  theme_classic() + 
+  theme(text = element_text(size=15), 
+        axis.text.x = element_text(angle=20, vjust=1, hjust=1))
+
+proteinCoding_by_fusion
+```
+
+```{r}
+length_by_fusion <- ggplot(protein.coding,
+       aes(x=Sample_Type, y=length, fill=Sample_Type)) + 
+  geom_boxplot() + 
+  labs(title="Frequency of Isoforms by Category", y="Length of Isoforms (bp)") +
+  scale_fill_brewer(type="qual", palette = "Set1") +
+  facet_wrap(~structural_category) +
+  theme_classic() + 
+  theme(text = element_text(size=15), 
+        axis.text.x = element_blank())
+
+length_by_fusion
+```
+
+
+*diff_to_TSS:* distance of query isoform 5' start to reference transcript start end. Negative value means query starts downstream of reference.
+
+*diff_to_TTS:* distance of query isoform 3' end to reference annotated end site. Negative value means query ends upstream of reference.
+
+```{r}
+quantile(protein.coding$diff_to_TTS, na.rm = TRUE)
+# tts.hist <- ggplot(protein.coding, aes(x=diff_to_TSS)) + 
+#   geom_histogram(binwidth = ) +
+#   # scale_x_continuous(breaks = seq(1,15, by=1)) +
+#   # geom_vline(aes(xintercept=median(log2(FL+1))), color="red", size=1.5) +
+#   theme_classic() + 
+#   theme(text = element_text(size=15))
+# 
+# tts.hist
+```
+
+```{r}
+quantile(protein.coding$diff_to_TSS, na.rm = TRUE)
+# tss.hist <- ggplot(protein.coding, aes(x=)) + 
+#   geom_histogram(binwidth = 0.5) +
+#   # scale_x_continuous(breaks = seq(1,15, by=1)) +
+#   # geom_vline(aes(xintercept=median(log2(FL+1))), color="red", size=1.5) +
+#   theme_classic() + 
+#   theme(text = element_text(size=15))
+```
+
+
+
+##Filter for, intron-retenction, TSS and TTS and CDS length
+
+```{r}
+high.confidence <- protein.coding %>% 
+  filter(subcategory != "intron_retention") %>% #avoid NDM
+  filter(ORF_length >= 100) %>% #most human protiens between 300-500 amino acids so 100 nucleotide ORF is still low ball. %>% 
+  mutate(TSS.OK= diff_to_TSS >= -500 & diff_to_TSS <= 500) %>% 
+  mutate(TTS.OK = diff_to_TTS >= -500 & diff_to_TTS <= 500) %>% 
+  filter(is.na(diff_to_TSS) | (TSS.OK & TTS.OK)) %>% 
+  filter(!is.na(polyA_motif))
+  
+  
+  
+dim(high.confidence)  # 148018     44
+length(unique(high.confidence$isoform))
+```
+
+```{r}
+# write.csv(high.confidence, "Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS.csv")
+```
+
+
+## Filter out NBM 
+
+```{r}
+NBM <- high.confidence %>% 
+  filter(grepl('NBM', Sample_Type))
+
+dim(NBM) #23783    44
+```
+
+```{r}
+AML <- high.confidence %>% 
+  filter(!grepl('NBM', Sample_Type)) %>% 
+  filter(isoform %in% setdiff(isoform, NBM$isoform))
+
+# head(AML)
+dim(AML) # 36938    44
+```
+
+```{r}
+# addmargins(table(samples$Reg.,samples$Sample_Info))
+table(AML$structural_category,AML$subcategory) #%>% 
+  # write.csv(.,file="AML_Isoforms_by_Category_Freq.csv")
+# length(table(AML$associated_gene)) #7548
+# length(unique(AML$isoform)) #21881
+```
+
+NUP98-NSD1; FLT3 ITD Hi AR has 2
+RUNX1-RUNX1T1 w/ KIT mutation has 2
+KMT2A-LASP1 / KMT2A-MLLT3 are 2
+
+##Take Union of Transcripts identified in Sample_Types 
+
+```{r}
+NBM.novel <- NBM %>% 
+  filter(structural_category == "novel_in_catalog" | 
+           structural_category == "novel_not_in_catalog")  %>%
+  filter(min_cov >= quantile(min_cov)[2]) #greater than the 25th percentile of minimum read coverage
+
+dim(NBM.novel) #7434
+# length(unique(NBM.novel$isoform)) #11573 44
+# write.csv(NBM.novel, "Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NIC_NNC_NBMonly.csv", row.names = FALSE)
+
+```
+
+```{r}
+AML.nic <- AML %>% 
+  filter(structural_category == "novel_in_catalog" ) %>% 
+  
+  group_by(isoform) %>% 
+  mutate(Detected_in_Number_AML_Samples=n()) %>%
+  
+  group_by(Sample_Type, add = TRUE) %>% 
+  mutate(Detected_in_Number_Sample_Type=n()) %>% 
+  ungroup() %>%
+  
+  mutate(union.sample=case_when(
+    grepl("NUP98-NSD1", Sample_Type) & Detected_in_Number_Sample_Type == 2 ~ TRUE, 
+    grepl("RUNX1-RUNX1T1", Sample_Type) & Detected_in_Number_Sample_Type == 2 ~ TRUE,
+    grepl("CBFA2T3-GLIS2", Sample_Type) & Detected_in_Number_Sample_Type == 2 & length <= 4000 ~ TRUE, 
+    grepl("CBFA2T3-GLIS2", Sample_Type) & Detected_in_Number_Sample_Type == 1 & length >= 4000 ~ TRUE, #keep all CBFGLIS transcripts that are long (bc missing the long cDNA-prep SMRT-cell  results)
+    grepl("FUS-ERG|KMT2A-LASP1|KMT2A-MLLT3|DEK-NUP214", Sample_Type) ~ TRUE, #just keep all singletons transcripts
+    TRUE ~ FALSE)) %>% 
+  filter(union.sample) %>% 
+  filter(min_cov >= quantile(min_cov)[2]) %>% #greater than 25th percentile of min coverage counts
+
+  select(Sample_Type,USI, Detected_in_Number_Sample_Type,
+         Detected_in_Number_AML_Samples, isoform,FL, everything()) %>% 
+  select(-matches("\\.OK$"),-matches("check")) %>%
+  arrange(Sample_Type,desc(FL)) 
+  
+  
+head(AML.nic)
+dim(AML.nic) #8333   45
+length(unique(AML.nic$isoform)) #4890
+```
+
+```{r}
+table(AML.nic$subcategory)
+table(AML.nic$n_indels_junc, useNA = "always")
+
+# write.csv(AML.nic, "Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NIC_AMLonly.csv", row.names = FALSE)
+```
+
+```{r}
+AML.nnc <- AML %>% 
+  filter(structural_category == "novel_not_in_catalog" ) %>% 
+  
+  group_by(isoform) %>% 
+  mutate(Detected_in_Number_AML_Samples=n()) %>%
+  
+  group_by(Sample_Type, add = TRUE) %>% 
+  mutate(Detected_in_Number_Sample_Type=n()) %>% 
+  ungroup() %>%
+  
+  mutate(union.sample=case_when(
+    grepl("NUP98-NSD1", Sample_Type) & Detected_in_Number_Sample_Type == 2 ~ TRUE, 
+    grepl("RUNX1-RUNX1T1", Sample_Type) & Detected_in_Number_Sample_Type == 2 ~ TRUE,
+    grepl("CBFA2T3-GLIS2", Sample_Type) & Detected_in_Number_Sample_Type == 2 & length <= 4000 ~ TRUE, 
+    grepl("CBFA2T3-GLIS2", Sample_Type) & Detected_in_Number_Sample_Type == 1 & length >= 4000 ~ TRUE, #keep all CBFGLIS transcripts that are long (bc missing the long cDNA prep results)
+    grepl("FUS-ERG|KMT2A-LASP1|KMT2A-MLLT3|DEK-NUP214", Sample_Type) ~ TRUE, #just keep all singletons transcripts
+    TRUE ~ FALSE)) %>% 
+  filter(union.sample) %>%
+  # filter(min_cov >= quantile(min_cov)[2]) %>%
+  #          grepl("")) %>%  #greater than 25th percentile of min coverage counts
+
+  select(Sample_Type,USI, Detected_in_Number_Sample_Type,
+         Detected_in_Number_AML_Samples, isoform,FL, everything()) %>%
+  select(-matches("\\.OK$"),-matches("check")) %>%
+  arrange(Sample_Type,desc(FL))
+
+dim(AML.nnc) #4588   45
+length(unique(AML.nnc$isoform)) #2913
+```
+
+```{r}
+# write.csv(AML.nnc, "SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NNC_AMLonly.csv", row.names = FALSE)
+```
+
+```{r}
+plot.objects <- Filter(function(x) inherits(get(x), "gg"), ls()) %>%
+  grep("restricted|Disc.", ., value=TRUE, invert = TRUE) 
+
+names(plot.objects) <- plot.objects
+
+# 
+# lapply(plot.objects, function(x)ggsave(filename=paste0(x,"_plot.png"), plot=get(x), device = "png", height = 5, width = 7, units="in", dpi=200))
+```
+
+#Subset AML NIC/NNC Transcript Fasta for kallisto
+
+
+```{r}
+if(exists("cated")){
+  sqanti <- cated
+}else{
+  sqanti <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification.csv")
+
+}
+
+dim(sqanti)
+```
+
+```{r}
+AML.nic <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NIC_AMLonly.csv")
+dim(AML.nic) # 8333   45
+```
+
+```{r}
+AML.nnc <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NNC_AMLonly.csv") 
+
+# head(AML.nnc[,1:10])
+dim(AML.nnc) #4588   45
+```
+
+```{r}
+sqanti.Novel.id.map <- sqanti %>%
+  select(isoform,associated_gene) %>% 
+  unique() %>% 
+  arrange(associated_gene) %>% 
+  
+  group_by(isoform) %>% 
+  mutate(associated_gene=collapseRows(col=associated_gene,uniq = FALSE)) %>%
+  ungroup() %>% 
+  
+  unique() %>%
+  filter(isoform %in% AML.nic$isoform |
+           isoform %in% AML.nnc$isoform)
+
+ 
+# dim(sqanti.Novel.id.map) #7815    2
+head(sqanti.Novel.id.map)
+```
+
+```{r}
+#Using the "corrected" fasta from cDNA_cupcake since we want SNVs to be corrected. We will be using this as our reference and want it as similar to ref sequence as possible for short-read quantification. 
+
+fasta <- readDNAStringSet(filepath = "7_SQANTI/all_movies/sqanti/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed_corrected.fasta", format = "fasta")
+
+head(fasta)
+length(fasta) #138,167
+class(fasta)
+# seqtype(fasta) #DNA
+```
+
+to translate sequences,
+> translate(fasta)
+
+```{r}
+translate(fasta$PB.2.1)
+```
+
+
+```{r}
+# dir(file.path(GENREFS,"GRCh38/fasta/cdna/gencode.v29.transcripts.fa"))
+ref <- readDNAStringSet(file.path(GENREFS,"GRCh38/fasta/cdna/gencode.v29.transcripts.fa"))
+
+# ref #206694
+class(ref)
+```
+
+
+```{r}
+novel.fasta <- fasta[sqanti.Novel.id.map$isoform]
+length(novel.fasta) #7803
+
+head(novel.fasta)
+
+```
+
+###Check that sequences are not in sqanti classified novels 
+
+```{r}
+inter.fasta <- intersect(novel.fasta, ref)
+
+inter.fasta
+showMethods("intersect")
+```
+
+```{r}
+inter.fasta.all <- intersect(ref,fasta)
+
+inter.fasta.all #63 have identical fasta seqs
+```
+
+
+```{r}
+# writeXStringSet(novel.fasta,filepath = "7_SQANTI/_Subsets/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed_corrected_AML_NIC_NNC.fasta")
+
+# writeXStringSet(fasta["PB.6682.13"],
+#                 filepath = "7_SQANTI/TARGET_AML_FLT3_PB.6682.13_isoform.fasta")
+
+
+# writeXStringSet(novel.fasta["PB.6682.14"],
+#                 filepath = "7_SQANTI/TARGET_AML_FLT3_PB.6682.14_isoform.fasta")
+
+
+# writeXStringSet(fasta["PB.6682.15"],
+#                 filepath = "7_SQANTI/TARGET_AML_FLT3_PB.6682.15_isoform.fasta")
+
+```
+
+
+
+#DeDuplicate ORF Sequences
+
+This likely could have been accomplished WAY easier by using biostrings...
+
+https://bioconductor.org/packages/release/bioc/vignettes/Biostrings/inst/doc/BiostringsQuickOverview.pdf
+
+
+```{r}
+sqanti <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification.csv")
+dim(sqanti)
+```
+
+```{r}
+sqanti.id.map <- sqanti %>%
+  select(isoform,associated_gene) %>% 
+  unique() %>% 
+  arrange(associated_gene) %>% 
+  
+  group_by(isoform) %>% 
+  mutate(associated_gene=collapseRows(col=associated_gene,uniq = FALSE)) %>%
+  ungroup() %>% 
+  
+  unique() 
+
+dim(sqanti.id.map)
+head(sqanti.id.map)
+```
+
+```{r}
+AML.NIC <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NIC_AMLonly.csv")
+dim(AML.NIC)
+```
+
+```{r}
+AML.nnc <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NNC_AMLonly.csv") 
+
+# head(AML.nnc[,1:10])
+dim(AML.nnc)
+```
+
+```{r}
+orf <- readLines("7_SQANTI/all_movies/sqanti/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed_corrected.faa")
+
+head(orf)
+length(orf) #186,940
+```
+
+```{r}
+orf.df <- map_dfr(.x=seq(1,length(orf),by=2),.f=function(i){data.frame(seq_name=gsub(">","", orf[i]) %>% 
+                                                                                  gsub("\\\t","|", .), 
+                                                                        ORF_sequence=orf[i+1])}) %>% 
+  separate(seq_name, 
+           into = c("isoform","gene_id","ORF_prediction_tool","ORF_length","strand","CDS_start","CDS_end"),
+           remove = F,sep = "\\|")
+  
+
+head(orf.df)
+dim(orf.df) #93470     9
+# write.csv(orf.df , "TARGET_AML_PacBio_ORF_Sequences.csv", row.names = FALSE)
+```
+
+```{r}
+Novel.ORFs <- orf.df %>% 
+  mutate(Novel=case_when( isoform %in% AML.NIC$isoform ~ "AML_NIC", 
+                          isoform %in% AML.nnc$isoform ~ "AML_NNC")) %>% 
+  #Note: some genes were filtered off by SQANTI in the demultiplexed samples, but not in the all_movies_combined files....
+  left_join(., sqanti.id.map, by="isoform")  %>%
+  filter(!is.na(Novel)) 
+
+
+# head(Novel.ORFs)
+table(Novel.ORFs$Novel)
+length(unique(Novel.ORFs$isoform)) #7813
+```
+                                
+```{r}
+deDup.Novel.ORFs <- Novel.ORFs %>% 
+  arrange(associated_gene) %>%
+  
+  #Identify duplciate/identical ORFs for a single gene, different tx isoforms
+  group_by(associated_gene) %>%
+  mutate(Identical_ORF=any(duplicated(ORF_sequence))) %>% 
+  mutate(Which_Duplicates= paste(isoform[which(duplicated(ORF_sequence))],
+                                 isoform[which(duplicated(ORF_sequence, fromLast = TRUE))],
+                                 sep="; ") %>% ifelse(is.character(.), ., NA)) %>%
+  mutate_at(vars(Identical_ORF), ~case_when(
+    !isoform %in% str_split(Which_Duplicates, pattern = "; ")[[1]] ~ FALSE,
+    TRUE ~ .)) %>%
+  ungroup() %>%
+  
+  #Remove trancripts with identical ORF sequences. 
+  #Rename them to include referecne to both tx isoforms
+  group_by(associated_gene, Identical_ORF) %>% 
+  mutate_at(vars(seq_name), ~case_when(
+    Identical_ORF == FALSE ~ .,
+    Identical_ORF == TRUE ~ paste(seq_name, sep=" ", collapse = " "))) %>%
+  ungroup() %>% 
+  filter(!duplicated(seq_name)) %>% 
+  
+  mutate(fasta_header=paste0(">",seq_name," ",associated_gene))
+  
+  
+dim(deDup.Novel.ORFs) #7232   14
+table(deDup.Novel.ORFs$Identical_ORF) #F:6649   T:583 
+```
+
+```{r}
+fasta <- unite(select(deDup.Novel.ORFs, fasta_header, ORF_sequence),col= "fasta", sep = "\n") %>% pull(fasta)
+length(fasta)
+# writeLines(fasta, con="Meshinchi_PacBio_Isoseq3_AML_Novel_ORFs.faa",sep = "\n")
+```
+
+
+#Characterization of ORF Sequences
+
+##Transmembrane Helices TMHMM 
+
+http://www.cbs.dtu.dk/services/TMHMM/
+
+```{r}
+TMHMM <- read.delim("AML_Neoantigens/AML_Only_NIC_TMHMM_Results.txt", sep="\t", header = FALSE) %>% 
+  separate(V1, into = c("PB_Isoform", "Type", "GMST_ID","Prediction_ORF",
+                        "Protein_Size_AA","AminoAcid","Strand","CDS_Start","CDS_End"), 
+           sep = "[\\|_]", remove = FALSE) %>% 
+  select(-AminoAcid) %>% 
+  rename("Prediction_Transmembrane"=V2, "Location"=V3,"TM_Region_Start"=V4, "TM_Region_End"=V5)
+
+head(TMHMM)
+dim(TMHMM) #8575   13
+```
+
+##Protein Domains 
+
+https://pfam.xfam.org/
+
+```{r}
+domain.descr <- read.delim("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/pdb_pfam_mapping.txt") %>% 
+  select(., PFAM_ACC,PFAM_Name,PFAM_desc) %>%
+  unique() %>% 
+  mutate(PFAM_ACC=gsub("\\.[0-9]{1,}","", PFAM_ACC))
+
+head(domain.descr)
+```
+
+```{r}
+PFAM <- read.delim("AML_Neoantigens/AML_only_NIC_pfam_results.txt", sep=" ", comment.char = "#", header=TRUE) %>% 
+    separate(seq_id, into = c("PB_Isoform", "Type", "GMST_ID","Prediction_ORF",
+                        "Protein_Size_AA","AminoAcid","Strand","CDS_Start","CDS_End"), 
+           sep = "[\\|_]", remove = FALSE) %>% 
+  select(-AminoAcid) %>% 
+  mutate(hmm_acc=gsub("\\.[0-9]{1,}","", hmm_acc)) %>%
+  left_join(., domain.descr,by=c("hmm_acc"="PFAM_ACC"))
+
+head(PFAM)
+dim(PFAM)
+```
+
+
+
+##Protein Localization 
+
+http://www.cbs.dtu.dk/services/doc/deeploc-1.0.readme
+
+```{r}
+LOC <- read.delim("AML_Neoantigens/AML_Only_NIC_DeepLoc_Results.txt", sep="\t", header = TRUE) %>% 
+      separate(ID, into = c("PB_Isoform", "Type", "GMST_ID","Prediction_ORF",
+                        "Protein_Size_AA","AminoAcid","Strand","CDS_Start","CDS_End"), 
+           sep = "[\\|_]", remove = FALSE) 
+
+head(LOC)
+```
+
+
+#AML Novel Theraputic Targets
+
+This was for the SCORE grant with Quy Le and Soheil. 
+
+```{r}
+Grant_Genes <- c("MSLN", "FOLR1", "CSPG4", "CRLF2", "CEACAM6", "CD70", "LAMP5", "CLEC2A","CLECL1")
+```
+
+```{r}
+GOI <- sqanti %>% 
+  filter(associated_gene %in% Grant_Genes) %>%
+  filter(grepl("novel", structural_category)) %>% 
+  group_by(isoform) %>% 
+  mutate(N_Samples_Expressing_Isoform=n(),
+         AML_Only_Expn=ifelse(!any(grepl("NBM",Sample_Type)),
+                         TRUE, FALSE)) %>% 
+  ungroup() 
+
+
+
+dim(GOI) #56 41
+length(unique(GOI$associated_gene))
+setdiff(Grant_Genes,unique(GOI$associated_gene)) #"CLEC2A" has no long read sequences at all, FOLR1, CSPG4, CRLF2, CEACAM6, have no novel isoforms
+```
+
+```{r}
+# write.table(unique(GOI$isoform), "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/isoform/2019Jan_FHCRC_Isoseq3_PacBio_data/SCOR_Grant_Genes.txt", sep="\t", quote = FALSE, row.names = FALSE,
+#             col.names = FALSE)
+```
+
+```{r}
+GOI %>% 
+  group_by(associated_gene,USI) %>% 
+  summarise(N=n()) %>% 
+  ungroup()#%>% 
+  # group_by(associated_gene) %>% 
+  # summarise(N=n())
+```
+
+```{r}
+table(GOI$AML_Only_Expn)
+
+GOI.AML.nic <- filter(GOI, AML_Only_Expn == TRUE) %>% 
+  arrange(isoform,USI)
+
+
+dim(GOI.AML.nic)
+head(GOI.AML.nic)
+```
+
+```{r}
+# write.csv(GOI,"TARGET_AML_SCOR_Grant_Genes_Novel_Isoseq_Isoforms.csv",
+#           row.names = FALSE)
+```
+
+## IL6R/IL6ST
+
+```{r}
+ID.map %>%
+  filter(grepl("^IL6R$|^IL6ST$", gene_name))
+# dir.create("IL6R")
+```
+
+```{r}
+IL6R.sqanti <- sqanti %>% 
+  filter(grepl("^IL6R$|^IL6ST$", associated_gene)) %>% 
+  arrange(associated_gene, structural_category, desc(exons))
+
+# IL6R.sqanti
+# head(IL6R.sqanti)
+# write.csv(IL6R.sqanti, "Genes_of_Interest/IL6R/TARGET_AML_Isoseq3_IL6R_IL6ST_SQANTI2_Isoforms.csv", row.names = FALSE)
+```
+
+```{r}
+# table(IL6R.sqanti$subcategory)
+```
+
+```{r}
+IL6R.PB.IDs <- IL6R.sqanti %>% 
+  pull(isoform) %>% 
+  unique()  %>% 
+  paste(., collapse = "|")
+
+# length(IL6R.PB.IDs) #14 unique seqs.
+```
+
+```{r}
+fasta.orig <- readDNAStringSet(filepath = "7_SQANTI/all_movies/sqanti/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed.fasta", format = "fasta")
+
+head(fasta.orig)
+length(fasta.orig) #138164
+```
+
+```{r}
+IL6RA.fasta <- fasta.orig[grep(IL6R.PB.IDs, names(fasta.orig))]
+
+# IL6RA.fasta #14 seqs
+# writeXStringSet(IL6RA.fasta, "IL6R/TARGET_AML_Isoseq3_IL6R_IL6ST_collapsed.filtered.rep.renamed.fasta", append=FALSE,
+#                 compress=FALSE, compression_level=NA, format="fasta")
+```
+
+```{r}
+protein.fasta <- readAAStringSet("7_SQANTI/all_movies/sqanti/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed_corrected.faa",
+                                  format = "fasta")
+
+head(protein.fasta)
+length(protein.fasta) #93,470
+```
+
+```{r}
+IL6RA.protein <- protein.fasta[grep(IL6R.PB.IDs, names(protein.fasta))]
+
+# IL6RA.protein #6 seqs
+# writeXStringSet(IL6RA.protein, "IL6R/TARGET_AML_Isoseq3_IL6R_IL6ST_Protein_collapsed.filtered.rep.renamed_corrected.faa", append=FALSE,
+#                 compress=FALSE, compression_level=NA, format="fasta")
+```
+
+## FOLR1
+
+```{r}
+FOLR1.samps <- manifest %>% 
+    filter(grepl("NBM|CD34_PB|diagnostic", Time_point), 
+         grepl("AML|NBM|CD34_PB", Group))  %>% 
+  filter(Sample %in% colnames(TPM.reference))
+
+dim(FOLR1.samps)
+```
+
+```{r}
+FOLR1.txIDs <- transcriptIDmap.ref %>%
+  filter(grepl("FOLR1", gene_name))
+
+FOLR1.txIDs
+# dir.create("FOLR1")
+```
+
+```{r}
+FOLR1.sqanti <- sqanti %>% 
+  filter(grepl("FOLR1", associated_gene)) %>% 
+  arrange(structural_category)
+  # filter(!grepl("mono-exon", ))
+
+# FOLR1.sqanti
+# head(FOLR1.sqanti)
+# write.csv(FOLR1.sqanti,file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/SQANTI_FOLR1_PacBio_LongRead_RNAseq.csv"), row.names = FALSE)
+```
+
+```{r}
+FOLR1.tx.TPM <- TPM.reference[,FOLR1.samps$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("transcript_id") %>% 
+  inner_join(., select(FOLR1.txIDs, transcript_id, gene_name), 
+             by="transcript_id") %>% 
+  gather(Sample, TPM, -transcript_id, -gene_name) 
+  
+  
+FOLR1.tx.dom <- FOLR1.tx.TPM %>% 
+  group_by(Sample) %>%
+  mutate(Rank=rank(TPM, ties.method = "first")) %>% 
+  mutate(DominantSpecies=case_when(
+    Rank==max(Rank) ~ transcript_id[Rank==max(Rank)],
+    Rank!=max(Rank) ~ as.character("NotDominant"))) %>% 
+  mutate_at(vars(DominantSpecies), ~case_when(
+    all(TPM == 0) ~ "NotExpressed", 
+    any(TPM > 0) ~ .)) %>% 
+  ungroup() %>% 
+
+  #spread() causes 4 lines per sample. Need to deduplicate
+  #So make NAs to zeros and collapse the rows using sum()
+  spread(transcript_id, TPM)  %>% 
+  group_by(Sample) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>% 
+  
+  #remove duplicated rows
+  filter(DominantSpecies != "NotDominant") %>%
+  filter(!duplicated(Sample)) %>% 
+  
+  #limit number of digits
+  mutate_at(vars(matches("^ENST|^PB")), ~round(., digits=5)) %>% 
+  
+  left_join(., select(FOLR1.samps,Sample,USI:AML_Subtype,Group,Tissue),
+            by="Sample") %>% 
+  left_join(., select(FOLR1.txIDs, transcript_id, transcript_type), 
+             by=c("DominantSpecies"="transcript_id")) %>% 
+  select(Sample,USI:Tissue,gene_name,transcript_type,
+         DominantSpecies, matches("^ENST"), -Rank)
+  
+
+  
+
+
+# dim(FOLR1.tx.TPM)
+# head(FOLR1.tx.TPM)
+options(scipen = 999)
+# table(FOLR1.tx.TPM$Group)
+
+
+# write.csv(FOLR1.tx.dom,file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/TARGET_AML_GRCh38_KallistoQuant_FOLR1_transcript_Expression.csv"), row.names = FALSE)
+```
+
+
+
+```{r}
+summ.stats <-    FOLR1.tx.TPM %>% 
+  left_join(., select(FOLR1.samps,Sample,USI:AML_Subtype,Group,Tissue),
+            by="Sample") %>% 
+  group_by(AML_Subtype,transcript_id) %>%
+  summarize(Mean_TPM=mean(TPM),
+            Median_TPM=median(TPM),
+            SD_TPM=sd(TPM),
+            Max_TPM=max(TPM)) %>%
+  mutate_if(is.numeric, ~round(., digits = 2)) %>% 
+  ungroup()
+
+
+# summ.stats
+```
+
+
+```{r}
+FOLR1.Table <- FOLR1.tx.dom %>% 
+  group_by(AML_Subtype, DominantSpecies) %>% 
+  summarise(Number_of_Samples=n()) %>% 
+  ungroup() %>% 
+  group_by(AML_Subtype) %>% 
+  mutate(Percent_of_Samples=round(Number_of_Samples/sum(Number_of_Samples)*100, digits=2)) %>% 
+  ungroup() %>% 
+  arrange(AML_Subtype, desc(Percent_of_Samples)) %>% 
+  # mutate(AML_Subtype= gsub("AML", "AML, NOS", AML_Subtype)) %>% 
+  left_join(.,  summ.stats, by=c("DominantSpecies"="transcript_id", "AML_Subtype"))
+
+
+# FOLR1.Table
+# View(FOLR1.Table)
+# write.csv(FOLR1.Table, file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/TARGET_AML_FOLR1_Dominant_Transcripts_Table.csv"), row.names = F)
+```
+
+
+#Expression in Short reads
+
+```{r}
+sqanti <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification.csv") %>% 
+  mutate(Sample_Type=factor(Sample_Type , levels=unique(Sample_Type)))
+
+dim(sqanti)
+```
+
+```{r}
+AML.nic <- read.csv("SQANTI_Filtering/Isoseq3_SQANTI_classification_Protein_Coding_TSS_TTS_NIC_AMLonly.csv")
+# head(AML.nic)
+dim(AML.nic)
+```
+
+```{r}
+TPMs <- readRDS("Kallisto_Quant/TARGET_AML_0531_1031_Kallisto_Quant_PacBio_TranscriptLevel_Abundance_TPM.RDS")
+# head(TPMs[,1:5])
+dim(TPMs) #211584   1568
+```
+
+```{r}
+#remove cell lines, MPN, flow sorted and replicate samples
+tx.RBD <- TPMs[,-grep("Kas|MV4|MPN|Sort|replicate|PolyA", colnames(TPMs), ignore.case = TRUE)]
+dim(tx.RBD) #1462
+
+#change to only USI for colnames
+colnames(tx.RBD) <- gsub("-","\\.", str_split_fixed(colnames(tx.RBD),  "-", 5)[,3])
+# rownames(tx.RBD) <- gsub("\\.[0-9]{1,2}","", rownames(tx.RBD))
+```
+
+
+##IL3RA 
+
+
+```{r}
+IL3RA.seqs <- readDNAStringSet("7_SQANTI/_Subsets/")
+
+# IL3RA.seqs <- as.list(readLines(con = "7_SQANTI/_Subsets/IL3RA.ORF.fasta")) 
+# pb.names <- gsub(">|\\\t","_",IL3RA.seqs[seq(1,8,by=2)])
+# IL3RA.seqs <- IL3RA.seqs[seq(2,8, by=2)] %>% 
+#   set_names(pb.names)
+
+IL3RA.seqs
+# identical(IL3RA.seqs$`_PB.26765.3_gene_113568|GeneMark.hmm|166_aa|+|698|1198`, 
+#           IL3RA.seqs$`_PB.26765.4_gene_113569|GeneMark.hmm|166_aa|+|785|1285`) #TRUE 
+```
+
+```{r}
+IL3RA.SQANTI <- sqanti %>% 
+  filter(grepl("IL3RA",associated_gene)) %>% 
+  left_join(.,select(LOC,PB_Isoform,Location),
+            by=c("isoform"="PB_Isoform")) %>%
+  select(Patient:isoform, Cellular_Location=Location, everything())
+
+head(IL3RA.SQANTI)
+# write.csv(IL3RA.SQANTI, "TARGET_AML_IL3RA_SQANTI2_Results.csv")
+```
+
+```{r}
+TMHMM %>% 
+  filter(PB_Isoform %in% IL3RA.SQANTI$isoform) %>% 
+  filter(Location == "TMhelix")
+
+unique(IL3RA.SQANTI[grepl("novel",IL3RA.SQANTI$structural_category),"isoform"])
+unique(IL3RA.SQANTI[,"isoform"]) %>% length()
+```
+
+```{r}
+table(IL3RA.SQANTI$isoform, IL3RA.SQANTI$structural_category)
+```
+
+```{r}
+bar.class <- ggplot(data=IL3RA.SQANTI,
+                    aes(x=structural_category, fill=isoform)) + 
+  geom_bar() +
+  theme_classic() +
+  scale_fill_brewer(palette = "Set1") +
+    theme(text = element_text(size=20),
+        axis.text = element_text(color="black"),
+        axis.text.x = element_text(angle=20, vjust=1,hjust=1), 
+        plot.margin = margin(l=2,unit="cm")) +
+  labs(title = "IL3RA Classification by Long-Read Isoseq", y="Number of Transcrips\nin Sample Population")
+
+bar.class
+# ggsave("SQANI_IL3RA_Barplot.png",plot=bar.class, device = "png",width = 7, height = 5, units = "in", dpi=450)
+```
+
+###Dominant IL3RA Isoforms
+
+```{r}
+IL3RA.Txs <- read.csv("IL3RA/TARGET_AML_PacBio_KallistoQuant_IL3RA_Expression.csv")
+```
+
+```{r}
+#For Lindsey Call - PB.2599.1 positive patients for RT-PCR validation
+IL3RA.Txs %>% 
+  arrange(desc(PB.25991.1)) %>% 
+  left_join(.,select(CDEs, USI, Reg.), 
+            by="USI") %>% 
+  select(USI,Reg., Group,DominantSpecies, PB.25991.1) %>% 
+  head() #%>%
+  # write.csv(.,"IL3RA/IL3RA_PB.25991.1_Expressing_by_short-reads.csv", row.names = FALSE)
+```
+
+```{r eval=FALSE}
+IL3RA.Txs <- tx.RBD[filter(ID.map,gene_name == "IL3RA")[["transcript_id"]],] %>% #base R for faster subsetting
+  as.data.frame() %>%
+  rownames_to_column("transcript_id") %>% 
+  gather(USI,TPM, -transcript_id) %>% 
+  spread(transcript_id,TPM) %>% 
+  mutate(ENST00000331035.9=ENST00000331035.9+ENST00000331035.9_PAR_Y,
+         ENST00000381469.7=ENST00000381469.7 + ENST00000381469.7_PAR_Y,
+         ENST00000432757.6=ENST00000432757.6+ ENST00000381469.7_PAR_Y) %>% #multimapping read counts are split 50/50 when equally likely to match a transcript seq in Kallisto. PAR_Y and X regios fasta in Gencode are idential.
+  select(-contains("_PAR_Y")) %>% 
+  
+  #Define the dominant species as the max expression
+  gather(transcript_id,TPM, -USI) %>%
+  arrange(USI) %>%
+  group_by(USI) %>%
+  mutate(DominantSpecies=ifelse(TPM==max(TPM), transcript_id, "NotDominant")) %>%
+  mutate(DominantSpecies=ifelse(TPM==max(TPM) & max(TPM) == 0,"NotExpressed",DominantSpecies)) %>%
+  
+  #messily fix ties. Pick the first one
+  mutate(D2=case_when(
+    sum(grepl("^ENST", DominantSpecies)) > 1 ~ DominantSpecies[grep("^ENST", DominantSpecies)[1]],
+    TRUE ~ DominantSpecies)) %>%
+
+  #change any entries with two "ENST" dominant species to "not dominant" status
+  group_by(USI,DominantSpecies) %>%
+  mutate(D3=case_when(
+    sum(grepl("^ENST", D2)) == n() & DominantSpecies != unique(D2)  ~ "NotDominant",
+    TRUE ~ DominantSpecies)) %>%
+  ungroup() %>%
+
+  #change the column Dominant species the intermediate column called D3
+  mutate(DominantSpecies=D3) %>%
+  dplyr::select(transcript_id,USI,TPM,DominantSpecies,-D2,-D3) %>%
+  spread(transcript_id, TPM) %>%
+
+  #makes NAs to zeros and collapse the rows using sum()
+  group_by(USI) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>%
+  filter(DominantSpecies != "NotDominant") %>%
+
+  group_by(USI) %>%
+  mutate(Annotated_Mean=sum(ENST00000331035.9+ENST00000381469.7+ENST00000432757.6)/3,
+         Novel_Mean=sum(PB.25991.1+PB.26765.3+PB.26765.3+PB.26765.4+PB.26765.8)/4) %>%
+  
+  mutate(Ratio_NovelvsAnno=round(Novel_Mean/Annotated_Mean,digits=2), 
+         Log2_FC=round(log2(Novel_Mean+1)-log2(Annotated_Mean+1),
+                          digits=2)) %>%
+  mutate(Group=case_when(
+            grepl("BM[0-9]|RO[0-9]", USI) ~ "NBM",
+            grepl("MPN", USI) ~ "MPN",
+            TRUE ~ "AML")) %>%
+  ungroup() %>% 
+  
+  group_by(Group) %>% 
+  mutate(PercentGreaterNovel=round(sum( Log2_FC >= 0.6)/n()*100, digits=2)) %>% 
+  ungroup() %>%
+  select(USI,Group,everything())
+  
+
+head(IL3RA.Txs,n=10)
+# dim(IL3RA.Txs) #1462   14
+# write.csv(IL3RA.Txs,"TARGET_AML_PacBio_KallistoQuant_IL3RA_Expression.csv", row.names = FALSE)
+```
+
+```{r}
+ IL3RA.long <- IL3RA.Txs %>% 
+  # select(-c(Annotated_Sum:FoldChange_NovelvsAnno)) %>%
+  gather(transcript_id,TPM,ENST00000331035.9:PB.26765.8) %>%
+  inner_join(., filter(ID.map,gene_name == "IL3RA"),
+            by=c("transcript_id")) %>% 
+  select(-matches("tag|ccdsid|^Number|^ont.")) %>% 
+  mutate(Log2_TPM=log2(TPM+1)) 
+
+head(IL3RA.long)
+```
+
+```{r fig.width=12}
+bplot <- ggplot(data=IL3RA.long, 
+                aes(x=transcript_id, y=Log2_TPM, fill=Group)) + 
+  # geom_violin() +
+  geom_boxplot() +
+  theme_classic() +
+  theme(text = element_text(size=20),
+        axis.text = element_text(color="black"),
+        axis.text.x = element_text(angle=20, vjust=1,hjust=1), 
+        plot.margin = margin(l=2,unit="cm")) +
+  labs(title = "IL3RA Expression by Short-Read RNA-seq",x="") + 
+  scale_x_discrete(labels=c("ENST00000331035.9"="Isoform 1",
+                            "ENST00000381469.7"="Isoform 2",
+                            "ENST00000432757.6"="Isoform 3",
+                            "PB.25991.1"="Isoform A",
+                            "PB.26765.3"="Isoform B",
+                            "PB.26765.4"="Isoform C",
+                            "PB.26765.8"="Isoform D")) +
+  scale_fill_brewer(type = "qual", palette="Paired")
+
+bplot
+# ggsave(filename = "TARGET_AML_PacBio_IL3RA_boxplots.png",plot=bplot, device = "png",dpi=600,units="in", height = 4, width = 12)
+# saveRDS(bplot, "boxplot_labels.RDS")
+```
+
+### Gel Samples of Interest
+
+email from Lindsey (lcall@fredhutch.org)
+
+Reg #'s for this gel:
+ 
+1: 833071
+2: 833906
+3: 839428
+4: 841081
+5: 846881
+6: 853852
+
+If you want more reg numbers, I also have two from another gel that used the same primers and displayed multiple products:
+
+823821
+846361
+
+
+```{r}
+samples <- c(833071,833906, 839428, 841081, 846881,
+             853852,823821,846361) #8 
+length(samples)
+
+df <- CDEs %>% 
+  filter(Reg. %in% samples)
+
+# dim(df)
+# table(df$Primary.Fusion.CNV)
+samples <- intersect(df$USI,colnames(tx.RBD))
+samples #7 with RNA-seq
+```
+
+```{r}
+#investigating samples from Lyndsey Calls Gel
+IL3RA.gel <- IL3RA.Txs %>% 
+  filter(USI %in% samples) %>%
+  left_join(., select(df,USI,Reg.), by="USI") %>%
+  select(USI,Reg.,matches("^ENST|^PB")) %>% 
+  gather(Isoform,TPM,matches("^ENST|^PB")) %>% 
+  filter(Isoform != "PB.26765.8") %>%
+  
+  group_by(Reg.) %>%
+  mutate(Max_TPM=max(TPM)) %>% 
+  ungroup() %>% 
+  
+  arrange(desc(Max_TPM)) %>% 
+  mutate(Reg.=factor(Reg., levels=unique(Reg.)))
+
+head(IL3RA.gel)
+# dim(IL3RA.gel) 
+```
+
+```{r fig.height=7, fig.width=11}
+labels <- c("ENST00000331035.9"="Isoform 1",
+                            "ENST00000381469.7"="Isoform 2",
+                            "ENST00000432757.6"="Isoform 3",
+                            "PB.25991.1"="Isoform A",
+                            "PB.26765.3"="Isoform B",
+                            "PB.26765.4"="Isoform C")
+
+bar.samples.gel <- ggplot(IL3RA.gel, aes(x=Isoform,y=TPM,fill=Reg.,color=Reg.)) +
+    geom_bar(stat = "identity", position = 'dodge') +
+    facet_wrap(~Reg.,scales = "free",ncol=4) +
+    scale_x_discrete(labels=labels) +
+    labs(x="") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle=45, 
+                                     vjust=1, hjust=1, size=14),
+          axis.text.y = element_text(size=16),
+          plot.margin = margin(l=1,unit="cm"),
+          legend.position = 'none',
+          strip.background = element_rect(fill="white"),
+          strip.text = element_text(size=16))
+
+# png("TARGET_AML_PacBio_IL3RA_shortReadQuant_GelSamples_barplot.png", height = 7, width = 11, units="in", res=300)
+bar.samples.gel
+# dev.off()
+```
+
+##FLT3 
+
+```{r}
+flt3.txs <- ID.map %>% 
+  filter(gene_name =="FLT3") %>% 
+  pull(transcript_id)
+
+FLT3 <- tx.RBD[flt3.txs,] %>%
+  as.data.frame() %>%
+  rownames_to_column("transcript_id") %>% 
+  gather(USI,TPM, -transcript_id) %>% 
+  mutate(Group=ifelse(grepl("^BM|^RO", USI), "NBM", "AML")) %>% 
+  left_join(., select(CDEs,USI,Cytogenetic.Category.1,Rare.Fusions), by="USI") %>% 
+  mutate_at(vars(Cytogenetic.Category.1,Rare.Fusions), ~ifelse(is.na(.), "NBM", .)) %>% 
+  
+  mutate(Cytogenetic.Category.1=factor(Cytogenetic.Category.1, levels=c("NBM",
+                                                                          "inv.16.","MLL",
+                                                                          "Normal","Other",
+                                                                          "t.8.21.","OtherAML")),
+           # Cytogenetic.Category.2=factor(Cytogenetic.Category.2, levels=c("NBM","NBM.CD34",
+           #                                                                "del5q", "del7q" ,"del9q",
+           #                                                                "M6", "M7", "monosomy.7",
+           #                                                                "OtherAML")),
+           Rare.Fusions=factor(Rare.Fusions, levels=c("NBM","CBFA2T3.GLIS2",
+                                                      "DEK.NUP214","NPM1.MLF1","NUP98.KDM5A",
+                                                      "NUP98.NSD1","RBM15.MKL1",
+                                                      "RUNX1.CBFA2T3","OtherAML")))
+
+
+
+head(FLT3)
+```
+
+```{r fig.width=14, fig.height=10}
+w.cyto <- waterfall_facets(ordered.data = d, 
+                           fill.col = "Cytogenetic.Category.1")
+w.cyto
+# ggsave("TARGET_AML_FLT3_withPacBioIsoforms_Cyto_waterfalls.png",plot=w.cyto,
+#        height = 10, width = 15, device = "png", units = "in", dpi=150)
+```
+
+```{r}
+
+```
+
+###Dominant FLT3 Isoforms
+
+```{r}
+FLT3.Txs <- FLT3 %>% 
+  #Define the dominant species as the max expression
+  group_by(USI) %>%
+  mutate(DominantSpecies=ifelse(TPM==max(TPM), transcript_id, "NotDominant")) %>%
+  mutate(DominantSpecies=ifelse(TPM==max(TPM) & max(TPM) == 0,"NotExpressed",DominantSpecies)) %>%
+  
+  #messily fix ties. Pick the first one
+  mutate(D2=case_when(
+    sum(grepl("^ENST", DominantSpecies)) > 1 ~ DominantSpecies[grep("^ENST", DominantSpecies)[1]],
+    TRUE ~ DominantSpecies)) %>%
+
+  #change any entries with two "ENST" dominant species to "not dominant" status
+  group_by(USI,DominantSpecies) %>%
+  mutate(D3=case_when(
+    sum(grepl("^ENST", D2)) == n() & DominantSpecies != unique(D2)  ~ "NotDominant",
+    TRUE ~ DominantSpecies)) %>%
+  ungroup() %>%
+
+  #change the column Dominant species the intermediate column called D3
+  mutate(DominantSpecies=D3) %>%
+  dplyr::select(transcript_id,USI,TPM,DominantSpecies,-D2,-D3) %>%
+  spread(transcript_id, TPM) %>%
+
+  #makes NAs to zeros and collapse the rows using sum()
+  group_by(USI) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>%
+  filter(DominantSpecies != "NotDominant") #%>%
+  
+  # gather(Transcript,TPM, matches("^ENST|^PB")) %>%
+  # mutate(Type=ifelse(grepl("ENST", Transcript), "Anno","Novel")) %>%
+
+  # group_by(USI,Type) %>%
+  # mutate(Mean=sum(TPM)) %>%
+  # ungroup() 
+
+
+head(FLT3.Txs,n=10)
+# dim(FLT3.Txs) #1462    9
+# write.csv(FLT3.Txs,"TARGET_AML_PacBio_KallistoQuant_FLT3_Expression.csv", row.names = FALSE)
+```
+
+
+##CD33
+
+```{r}
+#Using the "corrected" fasta from cDNA_cupcake since we want SNVs to be corrected. We will be using this as our reference and want it as similar to ref sequence as possible for short-read quantification. 
+
+fasta.orig <- readDNAStringSet(filepath = "7_SQANTI/all_movies/sqanti/all_movies.polished.hq.no5merge.collapsed.filtered.rep.renamed.fasta", format = "fasta")
+
+head(fasta.orig)
+length(fasta.orig) #138,167
+class(fasta.orig)
+# seqtype(fasta) #DNA
+
+```
+
+```{r}
+CD33.sqanti <- sqanti %>% 
+  filter(grepl("PB.13561", isoform))
+
+dim(CD33.sqanti) #186  41
+table(CD33.sqanti$isoform, CD33.sqanti$associated_gene)
+length(unique(CD33.sqanti$isoform))
+table(CD33.sqanti$coding)
+
+# write.csv(CD33.sqanti,"TARGET_AML_CD33_PB.13561_Isoseq_Annotations.csv",
+#           row.names = FALSE)
+```
+
+```{r}
+
+CD33.sqanti %>% 
+  group_by(isoform,associated_gene, structural_category) %>% 
+  arrange(isoform) %>% 
+  summarise(Number_Samples_Expressing_PB_Isoform=n()) %>%
+  write.csv(.,"TARGET_AML_CD33_PB.13561_isforms_Table.csv",
+            row.names = FALSE)
+
+```
+
+```{r}
+table(grepl("PB.13561\\.[0-9]",names(fasta.orig)))# what are there more???
+```
+
+```{r}
+CD33.fasta <- fasta.orig[unique(CD33.sqanti$isoform)]
+# writeXStringSet(CD33.fasta,
+#                 filepath = "7_SQANTI/_Subsets/TARGET_AML_CD33_PB.13561_isoforms.fasta")
+```
+
+## ASXL1
+
+```{r}
+ASXL1.samps <- manifest %>% 
+    filter(grepl("NBM|CD34_PB|diagnostic", Time_point), 
+         grepl("AML|NBM|CD34_PB", Group))  %>% 
+  filter(Sample %in% colnames(TPM.reference))
+
+dim(ASXL1.samps)
+```
+
+```{r}
+ASXL1.exons <- read.csv("ASXL1/ASXL1_Exon_Ranks.csv") %>% 
+  group_by(Transcript.stable.ID) %>% 
+  summarize(Number_Exons=n()) %>% 
+  ungroup()
+
+head(ASXL1.exons)
+# dim(ASXL1.exons)
+```
+
+```{r}
+ASXL1.txIDs <- transcriptIDmap.ref %>%
+  filter(grepl("ASXL1", gene_name)) %>% 
+  left_join(., ASXL1.exons, by=c("transcript_id"="Transcript.stable.ID")) %>%
+  select(gene_id, transcript_id,gene_name, transcript_type, Number_Exons)
+
+# ASXL1.txIDs
+# dir.create("ASXL1")
+# setdiff(ASXL1.exons$Transcript.stable.ID,ASXL1.txIDs$transcript_id )
+```
+
+```{r}
+ASXL1.sqanti <- sqanti %>% 
+  filter(grepl("ASXL1", associated_gene)) %>% 
+  arrange(structural_category)
+  # filter(!grepl("mono-exon", ))
+
+# ASXL1.sqanti[,1:10]
+#NOTE:most ASXL1 transcripts were removed in the SQANTI filter step for low coverage... 
+#SO the UCSC genome track browser with the raw aligned reads (pre-sqanti filter) are not included
+#however, I do wonder if those are real since they do match a lot of true annotated ASXL1 transcripts in GRCh38
+```
+
+```{r}
+ASXL1.tx.TPM <- TPM.reference[ASXL1.txIDs$transcript_id,ASXL1.samps$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("transcript_id") %>% 
+  gather(Sample, TPM, -transcript_id) %>% 
+  
+  group_by(Sample) %>%
+  mutate(Rank=rank(TPM, ties.method = "first")) %>% 
+  mutate(DominantSpecies=case_when(
+    Rank==max(Rank) ~ transcript_id[Rank==max(Rank)],
+    Rank!=max(Rank) ~ as.character("NotDominant"))) %>% 
+  mutate_at(vars(DominantSpecies), ~case_when(
+    all(TPM == 0) ~ "NotExpressed", 
+    any(TPM > 0) ~ .)) %>% 
+  ungroup() %>% 
+
+  #spread() causes 4 lines per sample. Need to deduplicate
+  #So make NAs to zeros and collapse the rows using sum()
+  spread(transcript_id, TPM)  %>% 
+  group_by(Sample) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>% 
+  
+  #remove duplicated rows
+  filter(DominantSpecies != "NotDominant") %>%
+  filter(!duplicated(Sample)) %>% 
+  
+  #limit number of digits
+  mutate_at(vars(matches("^ENST|^PB")), ~round(., digits=5)) %>% 
+  
+  left_join(., select(ASXL1.samps,Sample,USI:AML_Subtype,Group,Tissue),
+            by="Sample") %>% 
+  left_join(.,ASXL1.txIDs, by=c("DominantSpecies"="transcript_id")) %>%  
+  left_join(., select(CDEs,-Group,-Protocol), by="USI") %>% 
+  arrange(AML_Subtype,DominantSpecies) %>% 
+  select(-Rank,-X) %>% 
+  select(Sample,USI:Tissue,gene_name,
+         gene_id,
+         DominantSpecies_transcript_type=transcript_type,
+         DominantSpecies_Number_Exons=Number_Exons,
+         DominantSpecies, matches("^ENST"), everything())
+  
+
+
+
+dim(ASXL1.tx.TPM) #1615  186
+head(ASXL1.tx.TPM)
+options(scipen = 999)
+# table(ASXL1.tx.TPM$Group)
+
+# write.csv(ASXL1.tx.TPM, "ASXL1/TARGET_AML_ASXL1_transcript_abundance.csv", row.names = F)
+```
+
+```{r}
+ASXL1.Table <- ASXL1.tx.TPM %>% 
+  group_by(AML_Subtype, DominantSpecies,DominantSpecies_transcript_type,DominantSpecies_Number_Exons) %>% 
+  summarise(Number_of_Samples_Expressing_DominantSpecies=n()) %>% 
+  ungroup() %>% 
+  
+  group_by(AML_Subtype) %>% 
+  mutate(Percent_of_Samples_Expressing_DominantSpecies=round(Number_of_Samples_Expressing_DominantSpecies/sum(Number_of_Samples_Expressing_DominantSpecies)*100, digits=2)) %>% 
+  ungroup() %>% 
+  
+  arrange(AML_Subtype, desc(Percent_of_Samples_Expressing_DominantSpecies)) %>% 
+  mutate(AML_Subtype= gsub("AML", "AML, NOS", AML_Subtype))
+
+# table(ASXL1.Table$AML_Subtype)
+# write.csv(ASXL1.Table, "ASXL1/TARGET_AML_ASXL1_Dominant_Transcripts_Table.csv", row.names = F)
+```
+
+```{r}
+group_by(ASXL1.Table, AML_Subtype) %>% 
+  filter(Percent_of_Samples_Expressing_DominantSpecies==max(Percent_of_Samples_Expressing_DominantSpecies)) %>% 
+  mutate(AMLorNormal=ifelse(grepl("NBM|CD34_PB", AML_Subtype), "Normal", "AML")) %>% 
+  filter(AMLorNormal == "Normal")
+  # group_by(AMLorNormal,DominantSpecies) %>% 
+  # summarise(N=n())
+```
+
+```{r}
+filter(ASXL1.Table,DominantSpecies_Number_Exons<= 5, AML_Subtype !="NBM") %>% 
+  summarize(Min=min(Percent_of_Samples_Expressing_DominantSpecies), 
+            Max=max(Percent_of_Samples_Expressing_DominantSpecies))
+```
+
+sanity check the fusion data on APL (PML-RARA), JMML 
+batch effect from BCCA 
+
+## PRAME 
+
+```{r}
+PRAME.txIDs <- transcriptIDmap.ref %>%
+  filter(grepl("PRAME$", gene_name)) %>% 
+  select(gene_id, transcript_id,gene_name, transcript_type)
+
+# PRAME.txIDs
+```
+
+```{r}
+PRAME.sqanti <- sqanti %>% 
+  filter(grepl("PRAME$", associated_gene)) %>% 
+  arrange(structural_category)
+ 
+```
+
+```{r}
+PRAME.tx.TPM <- TPM.CellLines[PRAME.txIDs$transcript_id,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("transcript_id") %>% 
+  gather(Sample, TPM, -transcript_id) %>% 
+  
+  group_by(Sample) %>%
+  mutate(Rank=rank(TPM, ties.method = "first")) %>% 
+  mutate(DominantSpecies=case_when(
+    Rank==max(Rank) ~ transcript_id[Rank==max(Rank)],
+    Rank!=max(Rank) ~ as.character("NotDominant"))) %>% 
+  mutate_at(vars(DominantSpecies), ~case_when(
+    all(TPM == 0) ~ "NotExpressed", 
+    any(TPM > 0) ~ .)) %>% 
+  ungroup() %>% 
+
+  #spread() causes 4 lines per sample. Need to deduplicate
+  #So make NAs to zeros and collapse the rows using sum()
+  spread(transcript_id, TPM)  %>% 
+  group_by(Sample) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>% 
+  
+  #remove duplicated rows
+  filter(DominantSpecies != "NotDominant") %>%
+  filter(!duplicated(Sample)) %>% 
+  
+  #limit number of digits
+  mutate_at(vars(matches("^ENST|^PB")), ~round(., digits=5)) %>% 
+  
+  left_join(., select(manifest,Sample,Primary.Fusion),
+            by="Sample") %>% 
+  left_join(.,PRAME.txIDs,
+            by=c("DominantSpecies"="transcript_id")) %>%
+  rename_at(vars(matches("^ENST")), ~paste0(.,"_TPM")) %>% 
+  select(Sample,Primary.Fusion,
+         gene_name,
+         gene_id,
+         DominantSpecies_transcript_type=transcript_type,
+         DominantSpecies, matches("^ENST"), everything(),
+         -Rank)
+
+
+
+
+dim(PRAME.tx.TPM) #17 20
+head(PRAME.tx.TPM)
+
+# dir.create("Genes_of_Interest/PRAME")
+# write.csv(PRAME.tx.TPM, "Genes_of_Interest/PRAME/TARGET_AML_PRAME_transcript_abundance.csv", row.names = F)
+```
+
+```{r}
+PRAME.Table <- PRAME.tx.TPM %>% 
+  group_by(DominantSpecies,DominantSpecies_transcript_type) %>% 
+  summarise(Number_of_Samples_Expressing_DominantSpecies=n()) %>% 
+  ungroup() %>% 
+  
+  # group_by(DominantSpecies) %>% 
+  mutate(Percent_of_Samples_Expressing_DominantSpecies=round(Number_of_Samples_Expressing_DominantSpecies/sum(Number_of_Samples_Expressing_DominantSpecies)*100, digits=2)) %>% 
+  # ungroup() %>% 
+  
+  arrange(desc(Percent_of_Samples_Expressing_DominantSpecies)) 
+
+# table(PRAME.Table$AML_Subtype)
+# write.csv(PRAME.Table, "Genes_of_Interest/PRAME/TARGET_AML_PRAME_Dominant_Transcripts_Table.csv", row.names = F)
+```
+
+```{r}
+# PRAME.Table
+```
+
+## WT1 
+
+
+
+```{r}
+WT1.updated <- read.csv(file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/WT1_Transcripts/transcripts-Summary-Homo_sapiens_Transcript_Summary.csv")) %>% 
+  mutate_at(vars(Transcript.ID), ~gsub("\\.[0-9]{1,2}$","", .)) 
+head(WT1.updated)
+```
+
+```{r}
+WT1.ref <- transcriptIDmap.ref %>% 
+  filter(grepl("^WT1$", gene_name)) %>% 
+  left_join(., select(WT1.updated,Transcript.ID, Biotype, Translation.ID),
+            by=c("transcript_id"="Transcript.ID")) %>% 
+  select(-protein_id) %>% 
+  select(gene_id:transcript_type, Biotype, protein_id=Translation.ID, everything())
+
+WT1.ref
+
+# table(WT1.ref$Biotype, useNA="always")
+# View(WT1.ref)
+```
+
+```{r}
+WT1.Txs <- TPM.reference[WT1.ref$transcript_id, ] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("transcript_id") %>% 
+  gather(Sample, TPM, -transcript_id) %>% 
+  left_join(.,select(WT1.ref,gene_id:gene_name,Biotype, protein_id),
+            by=c("transcript_id"="transcript_id")) %>%
+
+  group_by(Sample) %>%
+  mutate(Rank=rank(TPM, ties.method = "first")) %>% 
+  mutate(DominantSpecies=case_when(
+    Rank==max(Rank) ~ transcript_id[Rank==max(Rank)],
+    Rank!=max(Rank) ~ as.character("NotDominant"))) %>% 
+  ungroup() %>% 
+  
+  mutate(Rank=ifelse(grepl("Protein coding", Biotype), Rank, 0)) %>% 
+  group_by(Sample) %>%
+  mutate(DominantSpecies_Protein_Coding=case_when(
+    Rank==max(Rank) ~ transcript_id[Rank==max(Rank)],
+    Rank!=max(Rank) ~ as.character("NotDominant")))  %>%
+  mutate_at(vars(DominantSpecies, DominantSpecies_Protein_Coding), ~case_when(
+    all(TPM == 0) ~ "NotExpressed",
+    any(TPM > 0) ~ .))  %>% 
+  ungroup() %>% 
+
+  # #spread() causes 4 lines per sample. Need to deduplicate
+  # #So make NAs to zeros and collapse the rows using sum()
+  # spread(transcript_id, TPM)  %>%
+  pivot_wider(id_cols = c(Sample,DominantSpecies,DominantSpecies_Protein_Coding),
+              names_from=transcript_id,
+              values_from=TPM) %>% 
+  
+  
+  group_by(Sample) %>%
+  mutate_at(vars(matches("^ENST|^PB")), ~replace(.,is.na(.),0)) %>%
+  mutate_at(vars(matches("^ENST|^PB")), sum) %>%
+  ungroup() %>% 
+
+  # #remove duplicated rows
+  filter(grepl("ENST|NotExpressed", DominantSpecies) | grepl("ENST|NotExpressed", DominantSpecies_Protein_Coding)) %>% 
+  group_by(Sample) %>% 
+  mutate_at(vars(DominantSpecies, DominantSpecies_Protein_Coding), ~case_when(
+    n() == 2 ~ .[.!="NotDominant"],
+    TRUE ~ .)) %>% 
+  ungroup() %>% 
+  filter(!duplicated(Sample)) %>% 
+
+  # #limit number of digits
+  # mutate_at(vars(matches("^ENST|^PB")), ~round(., digits=5)) %>% 
+  # 
+  left_join(., select(manifest,Sample,USI:AML_Subtype,Group,Tissue),
+            by="Sample") %>%
+  left_join(.,select(WT1.ref,transcript_id,gene_name,gene_id, 
+                     Biotype_Dominant_Species=Biotype),
+            by=c("DominantSpecies"="transcript_id")) %>%
+  left_join(.,select(WT1.ref,transcript_id, 
+                       Biotype_DominantSpecies_Protein_Coding=Biotype,
+                       protein_id_Dominant_Species= protein_id),
+            by=c("DominantSpecies_Protein_Coding"="transcript_id")) %>%
+
+  arrange(AML_Subtype,DominantSpecies,DominantSpecies_Protein_Coding) %>%
+  select(Sample,USI:Tissue,
+         gene_name,
+         gene_id,
+         DominantSpecies, 
+         DominantSpecies_Protein_Coding,
+         matches("Biotype"), 
+         matches("^ENST|^PB"), 
+         everything())
+  
+  
+
+# head(WT1.Txs,n=10)
+# dim(WT1.Txs) #1462    9
+
+# WT1.Txs
+# write.csv(WT1.Txs,file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/WT1_Transcripts/TARGET_AML_GRCh38_KallistoQuant_WT1_transcript_Expression.csv"), row.names = FALSE)
+```
+
+
+
+```{r}
+CBFGLIS <- manifest %>% 
+  filter(AML_Subtype=="CBFA2T3-GLIS2") %>% 
+  pull(Sample)
+
+WT1.Txs %>% 
+  filter(Sample %in% CBFGLIS)
+
+WT1.Txs %>% 
+  filter(DominantSpecies=="NotExpressed")
+```
+
+```{r}
+WT1.table_all <- WT1.Txs %>% 
+  filter(AML_Subtype=="CBFA2T3-GLIS2") %>% 
+  group_by(AML_Subtype, DominantSpecies,
+           DominantSpecies_Protein_Coding) %>% 
+  dplyr::count() %>% 
+  ungroup() %>% 
+  arrange(AML_Subtype, desc(n))
+
+
+WT1.table_pc <- WT1.Txs %>% 
+  filter(AML_Subtype=="CBFA2T3-GLIS2") %>% 
+  group_by(AML_Subtype,
+           DominantSpecies_Protein_Coding) %>% 
+  summarize(Number_of_Samples=n()) %>% 
+  ungroup() %>% 
+  arrange(AML_Subtype, desc(Number_of_Samples))
+
+
+# View(WT1.table_pc)
+# write.csv(WT1.table_pc,file.path(PROJHOME, "2017.02.15_CBF-GLIS_DEG/2020.12.23_CBFGLIS_Models/WT1_Transcripts/TARGET_AML_GRCh38_KallistoQuant_WT1_transcript_table.csv") )
+```
+
+```{r}
+WT1.table_pc_nbm <- WT1.Txs %>% 
+  filter(AML_Subtype=="NBM") %>% 
+  group_by(AML_Subtype,
+           DominantSpecies_Protein_Coding) %>% 
+  summarize(Number_of_Samples=n()) %>% 
+  ungroup() %>% 
+  arrange(AML_Subtype, desc(Number_of_Samples))
+
+# WT1.table_pc_nbm
+```
+
+
+##Summary Stats for all Novel PB Isoforms
+
+```{r}
+PacBio.Txs <- tx.RBD %>% 
+  as.data.frame() %>%
+  rownames_to_column("transcript_id") %>% 
+  # filter(rowSums(select_if(.,is.numeric) >= 1.0 ) >= 5) %>% #remove very low count transcripts
+  right_join(., ID.map, by=c("transcript_id")) %>%
+  select(colnames(ID.map), everything()) %>%
+  
+  group_by(gene_id) %>%
+  filter(any(grepl("PacBio", transcript_type))) %>%
+  ungroup()
+  
+head(PacBio.Txs[,c(1:5,30:35)])
+dim(PacBio.Txs) #35778  1485
+length(unique(PacBio.Txs$gene_id)) #2537
+# write.csv(PacBio.Txs, "TARGET_AML_RBD_Kallisto_Quant_Subset_PacBio_TranscriptLevel_Abundance_TPM.csv")
+```
+
+```{r}
+# View(PacBio.Txs[1:200,1:50])
+#need 2 functions to accomplish this with summarize_at() because it cannot do as complex manipulations without a wrapper function. 
+options(digits = 2 )
+Nover <- function(x,y,...){sum(x >= y, na.rm = TRUE)}
+Pover <- function(x,y,...){(sum(x >= y, na.rm = TRUE)/ sum(!is.na(x)))*100 }
+```
+
+```{r}
+dx.manifest <- manifest %>% 
+  filter(Time_point == "diagnostic" | Time_point == "NBM") %>% 
+  filter(USI %in% colnames(PacBio.Txs)) %>% 
+  filter(!grepl("replicate", Sample))
+
+
+dim(dx.manifest) #1459   15
+# head(dx.manifest)
+table(dx.manifest$Group)
+table(duplicated(dx.manifest$USI))
+# table(dx.manifest$USI %in% colnames(PacBio.Txs)) 
+# colnames(PacBio.Txs)[which(! colnames(PacBio.Txs)  %in% dx.manifest$USI)]
+```
+
+```{r}
+TPMs.novel <- PacBio.Txs %>%
+  filter(grepl("^PB", transcript_id)) %>% #only example PacBio at first
+
+  gather(USI, TPM, BM3897:S) %>%
+  left_join(.,select(dx.manifest, USI, Sample, Group, AML_Subtype)) %>%
+  # mutate(Group=ifelse(grepl("^RO|^BM", USI), "NBM", "AML")) %>%
+  # left_join(., select(Groups, USI, Subtype=Categories), by="USI") %>%
+  # mutate_at(vars(Subtype), ~ifelse(is.na(.) & Group=="NBM", "NBM", .)) %>%
+
+  # group_by(gene_id,transcript_id,Group) %>%
+  # mutate(Number_Samples_in_Subtype=n(),
+  #           Number_Subtype_Expressors_GT.10TPM=sum(TPM >= 10.0),
+  #           Percent_Subtype_Expressors_GT.10TPM=(sum(TPM >= 10.0)/n())*100,
+  #           Mean_TPM_in_Subtype=mean(TPM),
+  #           Median_TPM_in_Subtype=median(TPM),
+  #           Max_TPM_in_Subtype=max(TPM)) %>%
+  # ungroup() %>%
+  
+  group_by(gene_id,transcript_id,Group) %>%
+  mutate(Number_Samples=n(),
+            Number_Expressors_GT.5TPM=sum(TPM >= 5.0),
+            Percent_Expressors_GT.5TPM=(sum(TPM >= 5.0)/n())*100,
+            Mean_TPM_in_Subtype=mean(TPM),
+            Median_TPM_in_Subtype=median(TPM),
+            Max_TPM_in_Subtype=max(TPM)) %>%
+  ungroup() 
+```
+
+
+```{r}
+TPMs.novel.AML <- TPMs.novel %>% 
+  spread(Group,TPM) 
+  
+
+TPMs.novel.AML
+```
+
+
+```{r}
+
+  spread(Group,TPM) %>%
+ #  group_by(gene_id,transcript_id) %>%
+ #  mutate_at(vars(AML:NBM),
+ #               .funs = list(Number.Expressors_GT.10TPM=~Nover(.,y=10.0),
+ #                            Percent.Expressors_GT.10TPM=~Pover(.,y=10.0),
+ #                            median_TPM=median,
+ #                            mean_TPM=mean,
+ #                            max_TPM=max,
+ #                            std_dev=sd), na.rm=TRUE) %>% #N=n(),
+ #  ungroup() %>%
+ # 
+ #  filter(Subtype != "NBM") %>% #Don't need NBM later one becuase the same info is in the columns created after spread()
+ #  mutate(Ratio_all=AML_mean_TPM/NBM_mean_TPM,
+ #         Ratio_sub=Mean_TPM_in_Subtype/NBM_mean_TPM) %>%
+ #  mutate(Fold_Change_AML_vs_NBM=case_when(
+ #                    Ratio_all < 1.0 ~ -1/Ratio_all,
+ #                    Ratio_all > 1.0 ~ Ratio_all),
+ #         Fold_Change_Subtype_vs_NBM=case_when(
+ #                    Ratio_sub < 1.0 ~ -1/Ratio_sub,
+ #                    Ratio_sub > 1.0 ~ Ratio_sub)) %>%
+ #  mutate_if(is.numeric, ~round(.,digits = 2)) %>%
+ # 
+ # select(gene_id,transcript_id,gene_name,transcript_type,
+ #        contains("Fold_Change"),
+ #        Number_Transcripts:NBM_std_dev,
+ #        everything(),
+ #        -AML,-NBM,-USI,-Number_Transcripts,-contains("Ratio")) %>% #remove the TPM values and USIs because we need a summary - not individual data points anymore.
+ #  unique() %>% #unique for summarized level
+ #  arrange(gene_name,transcript_id, transcript_type)
+
+
+TPMs.novel
+```
+
+```{r}
+head(TPMs.novel)
+dim(TPMs.novel) #83198    43
+# length(unique(TPMs.novel$gene_id)) #248
+# write.csv(TPMs.novel, "TARGET_AML_RBD_PacBio_AMLOnlyNIC_Summarized_TPMs.csv", row.names = FALSE)
+```
+
+
+##Filter and Sort Short-Read Data for AML specific PacBio Isoforms
+
+```{r}
+TM.dat <- TMHMM %>% 
+  select(PB_Isoform, Protein_Size_AA,Transmembrane=Location) %>% 
+  filter(Transmembrane=="TMhelix") %>% 
+  unique()
+
+head(TM.dat)  
+dim(TM.dat)
+```
+
+```{r}
+LOC.dat <- LOC %>% 
+  select(PB_Isoform,Location) %>%
+  unique()
+
+head(LOC.dat)
+dim(LOC.dat)
+```
+
+```{r}
+PacBio_AML.Rescricted <- TPMs.novel %>%
+  left_join(., TM.dat, by=c("transcript_id"="PB_Isoform")) %>% 
+  left_join(., LOC.dat, by=c("transcript_id"="PB_Isoform")) %>% 
+  select(gene_id,transcript_id, gene_name,
+         transcript_type, Protein_Size_AA,Transmembrane, Location, 
+         everything()) %>% 
+  
+  filter(Location=="Cell_membrane") %>% 
+  filter(Fold_Change_Subtype_vs_NBM > 1.5) %>%
+  filter(AML_Percent.Expressors_GT.10TPM >= 5) %>%
+  filter(NBM_max_TPM < 10 & AML_max_TPM > 10) 
+
+dim(PacBio_AML.Rescricted)
+length(unique(PacBio_AML.Rescricted$transcript_id)) #46
+# write.csv(PacBio_AML.Rescricted, "TARGET_AML_RBD_PacBio_AML_NIC_Restricted_CellMem_Summarized_TPMs.csv", row.names = FALSE)
+```
+
+```{r}
+PacBio_Subtype.Discr <- TPMs.novel %>% 
+  left_join(., TM.dat, by=c("transcript_id"="PB_Isoform")) %>% 
+  left_join(., LOC.dat, by=c("transcript_id"="PB_Isoform")) %>% 
+  select(gene_id,transcript_id, gene_name,
+         transcript_type, Protein_Size_AA,Transmembrane, Location, 
+         everything()) %>% 
+  filter(AML_Number.Expressors_GT.10TPM <= Number_Samples_in_Subtype+139) %>%
+  filter(Percent_Subtype_Expressors_GT.10TPM > 50)
+  # filter(Fold_Change_Subtype_vs_NBM > 1.5)
+
+
+dim(PacBio_Subtype.Discr)
+length(unique(PacBio_Subtype.Discr$transcript_id))
+# write.csv(PacBio_Subtype.Discr, "TARGET_AML_RBD_PacBio_AML_NIC_Discriminating_Summarized_TPMs.csv", row.names = FALSE)
+```
+
+##Visuallize Novel Isoforms of Interest 
+
+```{r}
+colors <- c("dark grey","turquoise3",  "firebrick1", "blue","orange1",
+                "seagreen2","darkgoldenrod3", "maroon", "orchid", 
+                "cornflowerblue", "saddlebrown",
+                "darkblue","chartreuse1", "darkmagenta",
+                "deeppink", "green4", 
+                "deepskyblue1", "lightcoral",
+                "mediumorchid")
+```
+
+```{r}
+Restr.plots <- PacBio.Txs %>%
+  filter(transcript_id %in% PacBio_AML.Rescricted$transcript_id) %>% #only example PacBio at first
+
+  gather(USI, TPM, BM3897:S) %>%
+  mutate(Log2_TPM=log2(TPM+1),
+         Group=ifelse(grepl("^RO|^BM", USI), "NBM", "AML")) %>%
+  left_join(., select(Groups,USI, Subtype=Categories), by="USI") %>%
+  mutate_at(vars(Subtype), ~ifelse(is.na(.) & Group=="NBM", "NBM", .)) %>% 
+  # group_by(Subtype) %>% 
+  # arrange(desc(Log2_TPM)) %>% 
+  # ungroup() %>%
+  mutate(Subtype=factor(Subtype,levels=unique(Subtype)))
+
+
+# head(Restr.plots)
+dim(Restr.plots)
+```
+
+```{r fig.height=10, fig.width=14}
+restricted_by_Subtype <- ggplot(Restr.plots, aes(x=reorder(Subtype, Log2_TPM, FUN = median),y=Log2_TPM, fill=Subtype)) +
+  geom_boxplot() +
+  facet_wrap(~transcript_id + gene_name) + #scales="free_y"
+  theme_classic() + 
+  labs(x="", title="AML PacBio Novel In Catalog Isoforms") +
+  theme(axis.text.x = element_blank(), #element_text(angle=25, vjust=1, hjust=1, size=8)
+        axis.text.y = element_text(size=18), 
+        strip.text = element_text(size=12)) +
+  scale_fill_manual(values=colors[1:18])
+
+restricted_by_Subtype
+# ggsave(restricted_by_Subtype, filename = "AML_Restricted_NIC_by_Subtype.png", device = "png", units="in", height = 10, width = 16,dpi=300)
+```
+
+```{r fig.height=10, fig.width=14}
+restricted_by_AML <- ggplot(Restr.plots, aes(x=reorder(Group, Log2_TPM, FUN = max),y=Log2_TPM, fill=Group)) +
+  geom_boxplot() +
+  facet_wrap(~transcript_id + gene_name,scales="free_y") +
+  theme_classic() + 
+  labs(x="", title="AML PacBio Novel In Catalog Isoforms") +
+  theme(axis.text.x = element_blank(), #element_text(angle=25, vjust=1, hjust=1, size=8)
+        axis.text.y = element_text(size=18), 
+        strip.text = element_text(size=12)) +
+  scale_fill_manual(values=c("NBM"="dark grey", "AML"="red1"))
+
+# restricted_by_AML
+# ggsave(restricted_by_AML, filename = "AML_Restricted_NIC.png", device = "png", units="in", height = 10, width = 14,dpi=300)
+```
+
+```{r}
+Discr.plots <- PacBio.Txs %>%
+  filter(transcript_id %in% PacBio_Subtype.Discr$transcript_id) %>% #only example PacBio at first
+
+  gather(USI, TPM, BM3897:S) %>%
+  mutate(Log2_TPM=log2(TPM+1),
+         Group=ifelse(grepl("^RO|^BM", USI), "NBM", "AML")) %>%
+  left_join(., select(Groups,USI, Subtype=Categories), by="USI") %>%
+  mutate_at(vars(Subtype), ~ifelse(is.na(.) & Group=="NBM", "NBM", .)) %>% 
+  mutate(Subtype=factor(Subtype,levels=unique(Subtype)))
+
+
+head(Discr.plots)
+dim(Discr.plots)
+```
+
+```{r fig.height=10, fig.width=14}
+Discr_by_Subtype <- ggplot(Discr.plots, aes(x=Subtype,y=Log2_TPM, fill=Subtype)) +
+  geom_boxplot() +
+  facet_wrap(~transcript_id + gene_name,scales="free_y") + #
+  theme_classic() + 
+  labs(x="", title="AML PacBio Novel In Catalog Isoforms") +
+  theme(axis.text.x = element_blank(), #element_text(angle=25, vjust=1, hjust=1, size=8)
+        axis.text.y = element_text(size=18), 
+        strip.text = element_text(size=12)) +
+  scale_fill_manual(values=colors[1:18])
+
+Discr_by_Subtype
+# ggsave(Discr_by_Subtype, filename = "AML_Disriminating_by_Subtype_NIC.png", device = "png", units="in", height = 10, width = 16,dpi=300)
+```
+
+
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
+
+#Old Code
+groups.file <- "~/reference_mapping-files/TARGET_AML_RBD_Cohorts_forDE_5.20.19.csv"
+
+Groups <- read.csv(groups.file) %>% 
+  # add_row(USI=grep("^BM|^RO", colnames(gene.RBD), value=TRUE)) %>% 
+  mutate_at(vars(CBFA2T3.GLIS2.forDEGs:Rare.Fusions), .funs = ~ifelse(is.na(.), "NBM", .)) %>% 
+  set_colnames(gsub(".forDEGs","",colnames(.))) %>%
+  mutate(Categories=pheno_bars(., "USI", cols=c("CBFA2T3.GLIS2", "CBFB.MYH11", 
+                                                "KMT2A.ELL", "KMT2A.MLLT1",
+                                                "KMT2A.MLLT10","KMT2A.MLLT3",
+                                                "KMT2A.MLLT4", "NUP98.KDM5A", 
+                                                "NUP98.NSD1", "RUNX1.RUNX1T1", 
+                                                "KMT2A.LASP1", "DEK.NUP214", "FUS.ERG"))) %>% 
+  mutate(Categories=case_when(
+    grepl("NBM", Categories) ~ "NBM", 
+    grepl("OtherAML", Categories) & grepl("MLL", Cytogenetic.Category.1) ~ "KM2TA-X",
+    grepl("OtherAML", Categories) & grepl("Normal", Cytogenetic.Category.1) ~ "Normal_Cyto", 
+    grepl("OtherAML", Categories) & grepl("Other", Cytogenetic.Category.1) ~ "Other_Cyto", 
+    TRUE ~ Categories))
+  
+
+head(Groups)
+tail(Groups)
+dim(Groups)
+table(Groups$Categories)
+
+

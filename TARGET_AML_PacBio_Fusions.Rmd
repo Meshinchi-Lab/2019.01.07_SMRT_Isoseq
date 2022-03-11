@@ -1,0 +1,366 @@
+---
+title: 'Examine Fusion Calls in PacBio Long Reads'
+author: "Jenny Smith"
+date: "April 25, 2019"
+output: html_document
+---
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8, dpi = 600)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2019.01.07_SMRT_Isoseq/')
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+
+#Read in the Clinical Data
+
+```{r}
+CDE <- read.csv("~/reference_mapping-files/TARGET_AML_0531_1031_merged_CDEs_3.01.19.csv")
+
+CDE <- CDE %>% 
+  dplyr::filter(!is.na(Reg.)) %>% 
+  mutate(Reg.=as.character(Reg.))
+
+head(CDE[,1:5])
+dim(CDE)
+```
+
+```{r}
+samples <- read.csv("Sample_Submit_Files/Sample_ID_Map.csv") %>% 
+  left_join(., CDE, by="Reg.") 
+
+head(samples[,1:5])
+```
+
+```{r}
+select(samples,USI,Sample_Info) %>% 
+  unique() %>% 
+  arrange(Sample_Info)
+```
+
+
+```{r}
+manifest <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/SequencingDataMatrix/TARGET_AML_0531_1031_miRNAseq_Ribodepletion_mRNAseq_Manifest_v5.csv")
+
+head(manifest)
+```
+
+
+#Create a reference of Fusions Detected by Short Reads
+
+```{r}
+fusion.master <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/fusion/concat_matrices/2017July_BCCA_0531_1031_TransAbyss_STAR_K.Mungall_Combined_Illumina_data/TARGET_AML_0531_1031_TA.STAR.TargAlign_Combined_Annotated_4.10.19.csv")
+
+head(fusion.master[,1:5])
+dim(fusion.master)
+```
+
+```{r}
+fusion.ref <- samples %>% 
+  select(Reg., Sample_Number,Known_Fusion=Sample_Info) %>% 
+  unique() %>%
+  mutate(Reg.=gsub("NBM", "RO02297",Reg.)) %>% #not in sample submission sheets. recieved from Rhonda
+  left_join(., select(manifest, Final_Patient_ID, PATIENT_ID_Original, USI, Reg.,LIBRARY.mRNA), by="Reg.") %>% 
+  mutate(Fusion_Cyto=case_when(
+    grepl("KMT2A-LASP1", Known_Fusion) ~ "t(11;17)(q23;q12-21)", 
+    grepl("KMT2A-MLLT3", Known_Fusion) ~ "t(9;11)(p21;q23)", 
+    grepl("DEK-NUP214", Known_Fusion) ~ "t(6;9)(p22;q34) ", 
+    grepl("NUP98-NSD1", Known_Fusion) ~ "t(5;11)(q35;p15.5)", 
+    grepl("FUS-ERG", Known_Fusion) ~ "t(16;21)(p11;q22)", 
+    grepl("RUNX1-RUNX1T1", Known_Fusion) ~ "t(8;21)(q22;q22)", 
+    grepl("CBFA2T3-GLIS2", Known_Fusion) ~ "inv(16)(p13q24)",
+    TRUE ~ "Normal Bone Marrow")) %>%
+  select(-Known_Fusion, everything(),Known_Fusion) #%>%
+
+fusion.ref <- fusion.ref %>%
+  left_join(.,fusion.master %>% 
+              filter(USI %in% fusion.ref$USI) %>%
+    filter(grepl("NonePassedFilter|LASP1-|KMT2A-MLLT3|DEK-NUP214|NSD1-NUP98|FUS-ERG|RUNX1-RUNX1T1|CBFA2T3-GLIS2", All_Fusions_Called)) %>% 
+    select(USI, Short_Read_Fusion_Call=All_Fusions_Called,breakpoint.TA, Alternate.Breakpoints.TA), 
+    by="USI") %>% 
+  mutate(Short_Read_Fusion_Call=ifelse(grepl("NonePassedFilter", Short_Read_Fusion_Call), "", Short_Read_Fusion_Call))
+
+
+head(fusion.ref)
+dim(fusion.ref)
+
+# write.csv(fusion.ref, "Meshinchi_Isoseq3_Sample_manifest.csv", row.names=FALSE)
+```
+
+http://atlasgeneticsoncology.org/Anomalies/
+
+t(6;9)(p22;q34) DEK/NUP214
+t(5;11)(q35;p15.5) NUP98/NSD1
+t(16;21)(p11;q22) FUS/ERG
+t(11;17)(q23;q12-21) KMT2A/LASP1
+t(9;11)(p21;q23) KMT2A/MLLT3
+t(8;21)(q22;q22) RUNX1/RUNX1T1
+inv(16)(p13q24) CBFA2T3/GLIS2 
+
+
+#Read in the demux fusion counts
+
+```{r}
+fusions <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/level2/fusion/2018Jan_FHCRC_1031_Isoseq3_PacBio_data/all_movies_isoforms.fusion.fl_count.txt")
+
+head(fusions)
+dim(fusions)
+```
+
+```{r}
+gmap.fus <- read.csv("/fh/scratch/delete90/meshinchi_s/jlsmith3/SMRTseq/ETseng/gmap_fusion/liz_res_fusion.fl_count.txt")
+
+head(gmap.fus)
+dim(gmap.fus)
+```
+
+```{r}
+minimap.fus <- read.csv("/fh/scratch/delete90/meshinchi_s/jlsmith3/SMRTseq/ETseng/minimap_fusion/liz_res_fusion.fl_count.txt")
+
+head(minimap.fus)
+dim(minimap.fus)
+```
+
+
+
+
+#Reformat PacBio Fusions
+
+```{r}
+fusion.fmt <- function(PacBio.fusions){
+  fmt <- PacBio.fusions %>% 
+          gather(Reg., Read_Count, -id) %>% 
+          mutate(Reg.=gsub("^X","", Reg.)) %>%
+          mutate(Reg.=gsub("NBM", "RO02297",Reg.)) %>% 
+          left_join(.,dplyr::select(fusion.ref,-matches("breakpoint")), 
+                    by="Reg.") %>% 
+          separate(id, c("PacBio_Fusion","Coordinates","PacBio_Transcript_ID"),sep = "\\|", remove = F)
+  
+  coordinate.cols <- str_split_fixed(fmt$Coordinates,pattern = "\\)\\+", n = Inf) %>%
+                      set_colnames(paste("Coord",
+                                         LETTERS[1:ncol(str_split_fixed(fmt$Coordinates,pattern = "\\)\\+", n = Inf))],
+                                         sep=".")) %>%
+                      as.data.frame()
+  
+  
+  fmt <- bind_cols(fmt, coordinate.cols) %>%
+          separate(Coord.A, c("Coord.A","Strand.A"), sep = "\\(", remove=T) %>%
+          separate(Coord.B, c("Coord.B","Strand.B"), sep = "\\(", remove=T) %>% 
+          arrange(PacBio_Transcript_ID)
+  
+  if(grepl("Coord.C", colnames(coordinate.cols)) & grepl("Coord.D", colnames(coordinate.cols))){
+          
+    fmt <- fmt %>% 
+          separate(Coord.C, c("Coord.C","Strand.C"), sep = "\\(", remove=T, fill="right") %>%
+          separate(Coord.D, c("Coord.D","Strand.D"), sep = "\\(", remove=T, fill="right") 
+  }
+  
+  fmt <- fmt %>% 
+    mutate_at(vars(matches("Strand.[B-D]")), funs(gsub("\\)", "", .))) %>% 
+    filter(Read_Count > 0)
+  
+  return(fmt)
+}
+```
+
+```{r warning=FALSE}
+reformatted <- lapply(list(fusions,minimap.fus, gmap.fus ), fusion.fmt)
+names(reformatted) <- c("fusions","minimap.fus","gmap.fus")
+
+# lapply(reformatted, head)
+lapply(reformatted, dim)
+```
+
+
+#Annotate the Coordinates for Gene Names 
+
+```{r message=FALSE}
+library(GenomicRanges)
+```
+
+```{r}
+#https://support.bioconductor.org/p/67118/
+regions <- fusions.fmt %>% 
+  dplyr::select(contains("Coord."), contains("Strand.")) %>% 
+  mutate(Coord.A=ifelse(!Coord.A == "", paste(Coord.A,Strand.A, sep=":"), ""), 
+         Coord.B=ifelse(!Coord.B == "", paste(Coord.B,Strand.B, sep=":"), ""), 
+         Coord.C=ifelse(!Coord.C=="", paste(Coord.C,Strand.C, sep=":"), ""), 
+         Coord.D=ifelse(!Coord.D=="", paste(Coord.D,Strand.D, sep=":"), "")) %>% 
+  dplyr::select(matches("^Coord.[A-Z]")) %>%
+  gather(Partner_Coord, Coordinates) %>%
+  dplyr::filter(Coordinates != "") %>%
+  unique() %>%
+  mutate(Coordinates=gsub("chr", "", Coordinates) %>% 
+           gsub("^M:", "MT:", .)) %>%  #%>% gsub("-", ":", .)
+  mutate(N=1:nrow(.)) %>% 
+  dplyr::filter(!grepl("GL000224.1|KI270741.1", Coordinates)) #not in the version of ENSDB and there are no other more recent ones to use. loss of 2 gene partners info
+
+
+head(regions)
+dim(regions) #1551    2
+```
+
+```{r}
+gns <- GRanges(regions$Coordinates)
+head(gns)
+length(gns)
+seqlevels(gns)
+```
+
+```{r}
+# listColumns(EnsDb.Hsapiens.v86)
+cols <- c("gene_id","gene_name", "symbol","gene_biotype")
+gene.ref <- ensembldb::genes(EnsDb.Hsapiens.v86, columns=)
+head(gene.ref)
+# seqlevels(gene.ref) %>% head()
+```
+
+```{r}
+# setdiff(seqlevels(gene.ref), seqlevels(gns)) #a bunch only in ref. must suppressWarnings()
+setdiff(seqlevels(gns),seqlevels(gene.ref))
+```
+
+```{r warning=FALSE}
+res <- lapply(1:length(gns), function(i) suppressWarnings(IRanges::subsetByOverlaps(gene.ref, gns[i])))
+
+# head(res)
+# length(res)
+sapply(res, length) %>% 
+  table() # 386 regions have multimapping and 148 have no genes mapping. 
+```
+
+```{r}
+res.dfs <- sapply(res, mcols)
+# res.dfs[1:10]
+```
+
+```{r}
+regions.anno <- regions
+for (i in 1:length(res.dfs)){
+  r <- res.dfs[[i]] %>% 
+    as.data.frame()
+  cn <- c("gene_id","gene_name")
+
+  if(nrow(r) == 1 ){
+    regions.anno[i,cn] <- r[,cn]
+    
+  }else if(nrow(r) == 2){
+    gene_id <- grepl("ENSG", r[,"gene_id"])
+   
+    if(sum(i) == 1){
+      r <- r[which(gene_id),]
+    }else{
+      r <- r[1,] #take the first one
+    }
+    regions.anno[i,cn] <- r[,cn]
+
+  }else{
+    r <- sapply(res.dfs[[i]][,cn],
+                function(x) paste(unique(unlist(x)),collapse = ";"))
+    regions.anno[i,cn] <- r[cn]
+  }
+}
+
+head(regions.anno)
+```
+
+```{r}
+regions.anno <- regions.anno %>% 
+  mutate(Coordinates=gsub(":[\\+\\-]", "", Coordinates) %>%
+           gsub("^MT:", "M", .) %>%
+           paste0("chr", .)) %>% 
+  spread(Partner_Coord, Coordinates)
+
+head(regions.anno)
+```
+
+```{r}
+fusions.fmt.anno <- fusions.fmt %>% 
+  left_join(., dplyr::filter(regions.anno, Coord.A != "") %>% 
+              dplyr::select(Coord.A, Gene.A=gene_name, gene_id.A=gene_id),
+            by=c("Coord.A")) %>% 
+  left_join(., dplyr::filter(regions.anno, Coord.B != "") %>% 
+              dplyr::select(Coord.B, Gene.B=gene_name, gene_id.B=gene_id),
+            by=c("Coord.B"))  %>% 
+  left_join(., dplyr::filter(regions.anno, Coord.C != "") %>% 
+              dplyr::select(Coord.C, Gene.C=gene_name, gene_id.C=gene_id),
+            by=c("Coord.C"))  %>% 
+  left_join(., dplyr::filter(regions.anno, Coord.D != "") %>% 
+              dplyr::select(Coord.D, Gene.D=gene_name, gene_id.D=gene_id),
+            by=c("Coord.D")) %>% 
+  dplyr::filter(Read_Count > 0) %>% 
+  # unite(col="PacBio_Fusion",Gene.A, Gene.B,sep="-",remove = FALSE) %>%
+  # dplyr::filter(!grepl("^[A-Z]", Gene.A) | grepl("^[A-Z]", Gene.B)) #grepl("^[A-Z]", Gene.C)| grepl("^[A-Z]", Gene.D) 
+  # mutate_at(vars(PacBio_Fusion), funs(case_when(
+  #   !is.na(Gene.D) & !is.na(Gene.C) ~ paste(.,Gene.C, Gene.D, sep="-"),
+  #   is.na(Gene.D) & !is.na(Gene.C) ~  paste(., Gene.C, sep="-"), 
+  #   TRUE ~ .))) %>%
+  dplyr::select(id, Coordinates,PacBio_Transcript_ID, matches("PATIENT|USI"),everything()) %>%
+  arrange(desc(Read_Count))
+
+
+
+head(fusions.fmt.anno)
+# write.csv(fusions.fmt.anno, "TARGET_AML_PacBio_Fusions.csv", row.names = FALSE)
+```
+
+#Determine how many True Positives detected 
+
+```{r}
+find_possible_fusions <- function(fusion.fmtd){
+  
+  res <- fusion.fmtd %>% 
+          mutate(Called_PacBio=case_when(
+            grepl("inv(16)(p13q24)", Fusion_Cyto, fixed=TRUE) & grepl("chr16:.+chr16:", Coordinates) ~ TRUE, 
+            grepl("t(11;17)(q23;q12-21)", Fusion_Cyto, fixed=TRUE) & grepl("chr11:.+chr17:", Coordinates) ~ TRUE, 
+            grepl("t(16;21)(p11;q22)", Fusion_Cyto, fixed=TRUE) & grepl("chr16:.+chr21:", Coordinates) ~ TRUE, 
+            grepl( "t(5;11)(q35;p15.5)",Fusion_Cyto, fixed=TRUE) & grepl("chr5:.+chr11", Coordinates) ~ TRUE, 
+            grepl( "t(6;9)(p22;q34)",Fusion_Cyto, fixed=TRUE) & grepl("chr6:.+chr9:", Coordinates) ~ TRUE, 
+            grepl("t(8;21)(q22;q22)" ,Fusion_Cyto, fixed=TRUE) & grepl("chr8:.+chr21:", Coordinates) ~ TRUE,
+            grepl( "t(9;11)(p21;q23)", Fusion_Cyto, fixed=TRUE) & grepl("chr9:.+chr11:", Coordinates) ~ TRUE,
+            TRUE ~ FALSE)) %>% 
+          dplyr::filter(Called_PacBio)
+  
+  return(res)
+  
+}
+```
+
+```{r}
+check <- lapply(reformatted, find_possible_fusions)
+
+
+lapply(check, dim)
+```
+
+```{r}
+View(check$fusions)
+View(select(check$gmap.fus, Coordinates, USI, Known_Fusion))
+View(select(check$minimap.fus, Coordinates, USI, Known_Fusion))
+```
+
+
+Only 1 CBFA2T3-GLIS2 (PAVAVV) and 1 DEK-NUP214 (PAXLXJ) identified. 
+the 2nd CBFA2T3-GLIS2 (PAUMIH) had intrachromosomal fusions in chr 16, but DID NOT map to CBFA2T3-GLIS2 nor it appears anwhere near them. 
+
+GMAP sucks even worse... no idea why Liz suggested it is improved in fusion detection.... 
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
